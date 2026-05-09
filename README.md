@@ -1,6 +1,6 @@
 # dicom-skill
 
-`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
+`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
 
 This repository is a **skill folder**, not a long-running service. The operational contract lives in [`SKILL.md`](SKILL.md); the scripts in [`scripts/`](scripts/) are meant to be run directly from an agent shell.
 
@@ -17,6 +17,7 @@ This repository is a **skill folder**, not a long-running service. The operation
 - Request C-MOVE transfers to a known destination AE.
 - Start a temporary Orthanc receiver for C-MOVE workflows that need a local destination AE.
 - Send DICOM files or folders with C-STORE.
+- Anonymize local DICOM files or folders with an RSNA-anonymizer-derived script workflow.
 - Compress or decompress local DICOM pixel data with JPEG 2000.
 - Render local DICOM instances to PNG preview images.
 - Emit JSON output for audit trails, with an optional PHI-light summary mode for terminal or chat output.
@@ -32,9 +33,9 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - Keep retrieved payloads in explicit, user-controlled folders.
 - Preserve JSON/log audit artifacts by default.
 - Do not print full patient data unless the user explicitly asks for it.
+- Treat anonymization as an explicit, local file operation. Do not assume retrieved data is anonymous until `scripts/dicom_anonymize.py` has been run and the result has been checked.
+- The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
 - Treat PNG previews as sensitive because burned-in pixel annotations can remain visible.
-
-Anonymization is out of scope for this skill. If anonymization is needed, run a separate, explicit de-identification workflow.
 
 ## Repository layout
 
@@ -44,10 +45,14 @@ Anonymization is out of scope for this skill. If anonymization is needed, run a 
 ├── README.md                # Project overview
 ├── requirements.txt         # Python runtime dependencies
 ├── examples/
+│   ├── anonymize-local.md   # Local anonymization example
 │   ├── dicom_nodes.yaml     # Example node configuration
 │   └── orthanc-local.md     # Local Orthanc smoke workflow
+├── resources/
+│   └── rsna/                # Bundled RSNA anonymizer script and license
 └── scripts/
     ├── dicom_dimse.py       # C-ECHO, C-FIND, C-GET/C-MOVE, C-STORE CLI
+    ├── dicom_anonymize.py   # Local DICOM anonymization CLI
     ├── dicom_jpeg2000.py    # Local JPEG 2000 compression/decompression CLI
     ├── dicom_preview.py     # Local DICOM instance to PNG preview CLI
     ├── orthanc_temp.py      # Temporary Orthanc receiver helper
@@ -76,10 +81,10 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE, JPEG 2000, and PNG preview commands only require Python
-dependencies. JPEG 2000 encoding uses `pylibjpeg-openjpeg`; preview rendering
-uses `Pillow`. Docker is only needed for the helper that launches a temporary
-Orthanc receiver.
+The DIMSE, anonymization, JPEG 2000, and PNG preview commands only require
+Python dependencies. JPEG 2000 encoding uses `pylibjpeg-openjpeg`; preview
+rendering uses `Pillow`. Docker is only needed for the helper that launches a
+temporary Orthanc receiver.
 
 ## Configuration
 
@@ -289,7 +294,30 @@ specific 1-based frame or `--all-frames` to render every frame. Use
 `--max-size 1024` for compact review PNGs, or override grayscale display with
 `--window-center` and `--window-width`.
 
-### 8. Send files with C-STORE
+### 8. Anonymize local DICOM files
+
+Use `scripts/dicom_anonymize.py` only on local files or folders. It does not
+contact remote DICOM nodes. The default workflow uses the bundled
+`resources/rsna/default-anonymizer.script` file to decide which DICOM attributes
+are retained, removed, blanked, UID-remapped, date-shifted, or pseudonymized.
+
+```bash
+python scripts/dicom_anonymize.py \
+  --path downloads/study \
+  --out anonymized/study \
+  --site-id 123456 \
+  --project-name research_export \
+  --summary \
+  --out-json audit/anonymize_result.json
+```
+
+Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization.
+Use `--map-json secure/anon_map.json` only when mappings must persist across
+runs; the mapping file can contain PHI because original identifiers may be used
+as keys. The anonymizer marks datasets with `PatientIdentityRemoved=YES`, but it
+does not remove burned-in pixel annotations or run OCR.
+
+### 9. Send files with C-STORE
 
 Discover readable DICOM files before sending:
 
@@ -344,16 +372,20 @@ destination.
 
 ## Output and audit files
 
-All DIMSE, JPEG 2000, and PNG preview commands print JSON. Use:
+All DIMSE, anonymization, JPEG 2000, and PNG preview commands print JSON. Use:
 
 - `--summary` for concise, PHI-light terminal output.
 - `--out-json path/to/result.json` to persist the full result for audit/debugging.
-- Explicit output directories such as `downloads/` or `audit/` for retrieved
-  payloads and command results.
+- Explicit output directories such as `downloads/`, `anonymized/`, `previews/`,
+  or `audit/` for payloads and command results.
+- Avoid `--include-files` in chat output unless needed; source paths can contain PHI.
 
 After successful verification, remove temporary ZIP, DICOM payload, or PNG
 preview folders that were created only for the operation. Keep JSON summaries,
 command logs, and UID lists unless the user asks to remove them.
+
+Do not delete anonymized exports or mapping JSON files unless the user
+explicitly asks. Mapping JSON files can contain PHI.
 
 ## Troubleshooting
 
@@ -395,6 +427,16 @@ Run `python scripts/validate_install.py` and check the pixel decoder details.
 JPEG 2000 and other compressed transfer syntaxes require an available pydicom
 pixel decoder.
 
+**Anonymized files still contain visible burned-in annotations**
+
+This skill's anonymizer does not run OCR or pixel masking. Do not share previews
+or images externally until pixel PHI has been reviewed or removed separately.
+
+**Anonymization mapping differs across runs**
+
+Use `--map-json` to load/update a secure PHI-containing mapping file, or use
+`--patient-id-strategy hashed` with a stable project salt.
+
 ## Development notes
 
 Validate the local install:
@@ -408,12 +450,20 @@ Inspect command help:
 ```bash
 python scripts/dicom_dimse.py --help
 python scripts/dicom_dimse.py query --help
+python scripts/dicom_anonymize.py --help
 python scripts/dicom_jpeg2000.py --help
 python scripts/dicom_preview.py --help
 python scripts/orthanc_temp.py --help
 ```
 
-For a local smoke flow, see [`examples/orthanc-local.md`](examples/orthanc-local.md).
+For local smoke flows, see [`examples/orthanc-local.md`](examples/orthanc-local.md)
+and [`examples/anonymize-local.md`](examples/anonymize-local.md).
+
+## RSNA anonymizer note
+
+The bundled anonymization script is derived from the RSNA DICOM Anonymizer
+project at <https://github.com/RSNA/anonymizer>. Copied RSNA material lives in
+`resources/rsna/` and includes the original Apache 2.0 license.
 
 ## License
 

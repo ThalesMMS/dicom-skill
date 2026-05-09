@@ -8,8 +8,10 @@ import shutil
 import socket
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 
@@ -68,6 +70,22 @@ def preview_info() -> dict[str, Any]:
     }
 
 
+def rsna_script_info() -> dict[str, Any]:
+    script_path = Path(__file__).resolve().parent.parent / "resources" / "rsna" / "default-anonymizer.script"
+    if not script_path.exists():
+        return {"available": False, "path": str(script_path), "reason": "missing"}
+    try:
+        root = ET.parse(script_path).getroot()
+        return {
+            "available": True,
+            "path": str(script_path),
+            "element_rules": len(root.findall("e")),
+            "rule_count": len(root.findall("r")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "path": str(script_path), "reason": str(exc)}
+
+
 def docker_info() -> dict[str, Any]:
     docker_path = shutil.which("docker")
     if not docker_path:
@@ -93,7 +111,14 @@ def port_busy(port: int) -> bool:
 
 
 def main() -> int:
-    result: dict[str, Any] = {"ok": True, "packages": {}, "codecs": {}, "docker": {}, "ports": {}}
+    result: dict[str, Any] = {
+        "ok": True,
+        "packages": {},
+        "codecs": {},
+        "rsna_anonymizer_script": {},
+        "docker": {},
+        "ports": {},
+    }
     packages = [
         ("pydicom", None, "pydicom"),
         ("pynetdicom", None, "pynetdicom"),
@@ -115,6 +140,9 @@ def main() -> int:
         result["ok"] = False
     result["codecs"]["preview_png"] = preview_info()
     if not result["codecs"]["preview_png"].get("ok"):
+        result["ok"] = False
+    result["rsna_anonymizer_script"] = rsna_script_info()
+    if not result["rsna_anonymizer_script"].get("available"):
         result["ok"] = False
     result["docker"] = docker_info()
     result["ports"] = {"4242_busy": port_busy(4242), "8042_busy": port_busy(8042)}

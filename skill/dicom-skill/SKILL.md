@@ -1,19 +1,19 @@
 ---
 name: dicom-skill
-description: Perform DICOM DIMSE C-ECHO, C-FIND, C-GET/C-MOVE retrieval, C-STORE send operations, local JPEG 2000 compression/decompression, and DICOM-to-PNG preview rendering from an agent shell. Includes helper scripts to create a temporary Orthanc receiver with AE title AGENT on DICOM port 4242 when a C-MOVE destination is needed.
+description: Perform DICOM DIMSE C-ECHO, C-FIND, C-GET/C-MOVE retrieval, C-STORE send operations, local DICOM anonymization, JPEG 2000 compression/decompression, and DICOM-to-PNG preview rendering from an agent shell. Includes helper scripts to create a temporary Orthanc receiver with AE title AGENT on DICOM port 4242 when a C-MOVE destination is needed.
 ---
 
 # dicom-skill
 
-Use this skill when the user asks an agent to interact with DICOM nodes/PACS/VNA/Orthanc using DIMSE operations: verify connectivity, query metadata, retrieve instances, send DICOM files, locally compress/decompress DICOM pixel data with JPEG 2000, or render local DICOM instances to PNG previews.
+Use this skill when the user asks an agent to interact with DICOM nodes/PACS/VNA/Orthanc using DIMSE operations: verify connectivity, query metadata, retrieve instances, send DICOM files, anonymize local DICOM files, locally compress/decompress DICOM pixel data with JPEG 2000, or render local DICOM instances to PNG previews.
 
 This is a shell/CLI skill, not an MCP server. Do not start an MCP server. Use the scripts in `scripts/` directly.
 
 ## Safety and data handling
 
-DICOM metadata and files can contain patient-identifying information. Do not connect to clinical systems, retrieve studies, or send images unless the user has authorization and has provided the DICOM endpoint details. Keep outputs in local, user-controlled folders. Avoid printing full patient data unless the user explicitly asks for it. PNG previews can preserve burned-in annotations already present in pixel data. Do not anonymize by assumption; anonymization is a separate task.
+DICOM metadata and files can contain patient-identifying information. Do not connect to clinical systems, retrieve studies, send images, or anonymize clinical payloads unless the user has authorization and has provided the endpoint or file details. Keep outputs in local, user-controlled folders. Avoid printing full patient data unless the user explicitly asks for it. PNG previews can preserve burned-in annotations already present in pixel data. Anonymization must be an explicit local file operation; never assume retrieved or received files are de-identified until `scripts/dicom_anonymize.py` has been run and checked.
 
-For troubleshooting, prefer C-ECHO first. For data movement, prefer the least invasive operation that satisfies the request. When the user wants to copy studies from one DICOM node to another known DICOM destination, prefer C-MOVE directly to that destination AE over C-GET + C-STORE. Never delete, overwrite, or modify remote DICOM data from this skill.
+For troubleshooting, prefer C-ECHO first. For data movement, prefer the least invasive operation that satisfies the request. When the user wants to copy studies from one DICOM node to another known DICOM destination, prefer C-MOVE directly to that destination AE over C-GET + C-STORE. Never delete, overwrite, or modify remote DICOM data from this skill. The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
 
 ## Install dependencies
 
@@ -26,7 +26,7 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE, JPEG 2000, and PNG preview scripts require Python packages only. JPEG 2000 encoding requires `pylibjpeg-openjpeg`; PNG preview rendering requires `Pillow`. The temporary Orthanc helper requires Docker and the `orthancteam/orthanc` image, pulled automatically by Docker if absent.
+The DIMSE, anonymization, JPEG 2000, and PNG preview scripts require Python packages only. JPEG 2000 encoding requires `pylibjpeg-openjpeg`; PNG preview rendering requires `Pillow`. The temporary Orthanc helper requires Docker and the `orthancteam/orthanc` image, pulled automatically by Docker if absent.
 
 ## Configuration
 
@@ -169,9 +169,26 @@ python scripts/dicom_preview.py \
 
 For multiframe instances, the default is the first frame. Use `--frame 5` for a specific 1-based frame or `--all-frames` to render every frame. Use `--max-size 1024` for a smaller preview, or manual grayscale windowing with `--window-center` and `--window-width`.
 
+### Anonymize local DICOM files
+
+Use this only for files already present on disk. It does not contact remote DICOM nodes. The bundled default script is `resources/rsna/default-anonymizer.script`, derived from the RSNA anonymizer script. It removes private groups by default, removes elements not retained by the script, applies `@uid`, `@ptid`, `@acc`, `@hashdate`, `@empty`, and `@round` operations, then writes anonymized DICOM files under the output directory.
+
+```bash
+python scripts/dicom_anonymize.py \
+  --path /mnt/data/dicom_downloads \
+  --out /mnt/data/anonymized \
+  --site-id 123456 \
+  --summary \
+  --out-json /mnt/data/audit/anonymize.json
+```
+
+Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization. Use `--map-json /secure/path/anon_map.json` only when the user needs mappings to persist across runs; the mapping file can contain PHI and must be stored securely. Use `--include-files` only when needed because source paths can contain PHI.
+
+Before sending anonymized output to another DICOM node, run a dry-run C-STORE against the anonymized output folder and keep the anonymization JSON audit artifact.
+
 ## Cleanup after successful operations
 
-After the transfer/retrieve/send/transcoding/preview operation is complete and verification has passed, clear temporary ZIP, DICOM payload, and PNG preview files created in the workspace. Keep audit artifacts (`*.json`, `*.log`, summaries, study UID lists) unless the user asks to remove them too.
+After the transfer/retrieve/send/transcoding/preview/anonymization operation is complete and verification has passed, clear temporary ZIP, DICOM payload, and PNG preview files created in the workspace. Keep audit artifacts (`*.json`, `*.log`, summaries, study UID lists) unless the user asks to remove them too.
 
 Typical temporary payloads to remove:
 
@@ -180,6 +197,8 @@ Typical temporary payloads to remove:
 - Temporary C-MOVE/export payload folders such as `$AUDIT/move_out`
 - Local preview folders such as `$AUDIT/previews`
 - Workspace-local copies of inbound ZIPs, if any were created only for the operation
+
+Do not delete anonymized exports or mapping JSON files unless the user explicitly asks. Mapping JSON files can contain PHI.
 
 Prefer a recoverable delete when available:
 
@@ -212,11 +231,12 @@ The helper exposes Orthanc REST only on `127.0.0.1:8042` by default, while DICOM
 3. For query, keep return tags focused. Include `StudyInstanceUID`, `SeriesInstanceUID`, or `SOPInstanceUID` if the next step may retrieve data.
 4. For source → known destination copies, prefer C-MOVE directly to the destination AE and then verify on the destination. Use C-GET primarily for local downloads or when no destination AE is registered.
 5. If C-GET returns failed suboperations or retrieves fewer instances than expected, switch to C-MOVE instead of C-STORE-ing a partial local folder.
-6. For local JPEG 2000 compression/decompression, keep source and output folders separate, run a dry-run on large folders, and persist the JSON result with `--out-json`.
-7. For PNG preview rendering, keep previews in an explicit output folder, use `--max-size` when a compact visual check is enough, and remember burned-in pixel annotations can remain visible.
-8. For send, verify the destination with C-ECHO, run a dry-run on the file set, then send.
-9. Save full command output JSON with `--out-json` for auditability and use `--summary` for terminal/chat output on large studies.
-10. After successful verification, clear temporary ZIP/DICOM/PNG payload files created in the workspace while preserving audit JSON/logs by default.
+6. For anonymization, process only explicit local input paths, write to a separate output directory, save `--out-json`, and do not claim pixel PHI has been removed.
+7. For local JPEG 2000 compression/decompression, keep source and output folders separate, run a dry-run on large folders, and persist the JSON result with `--out-json`.
+8. For PNG preview rendering, keep previews in an explicit output folder, use `--max-size` when a compact visual check is enough, and remember burned-in pixel annotations can remain visible.
+9. For send, verify the destination with C-ECHO, run a dry-run on the file set, then send. If the user requests anonymized transfer, send only from the anonymized output directory.
+10. Save full command output JSON with `--out-json` for auditability and use `--summary` for terminal/chat output on large studies.
+11. After successful verification, clear temporary ZIP/DICOM/PNG payload files created in the workspace while preserving audit JSON/logs by default.
 
 ## Troubleshooting
 
@@ -233,3 +253,7 @@ Temporary Orthanc cannot start: Docker may be unavailable, the image may be unav
 JPEG 2000 compression fails with missing encoder dependencies: install `requirements.txt` and rerun `python scripts/validate_install.py`; encoding requires `numpy`, `pylibjpeg`, and `pylibjpeg-openjpeg`.
 
 PNG preview fails on compressed input: install `requirements.txt` and rerun `python scripts/validate_install.py`; JPEG 2000 and other compressed transfer syntaxes require an available pydicom pixel decoder.
+
+Anonymized files still contain visible burned-in annotations: this skill's anonymizer does not run OCR or pixel masking. Do not share externally until pixel PHI has been reviewed or removed with a separate workflow.
+
+Anonymization mapping differs across separate runs: use `--map-json` to load/update a secure PHI-containing mapping file, or use `--patient-id-strategy hashed` with a stable project salt.
