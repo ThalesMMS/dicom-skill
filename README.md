@@ -11,8 +11,10 @@ operational contract lives in
 directly from an agent shell.
 
 <p align="center">
-  <img src="screenshot1.png" alt="WhatsApp conversation showing DICOM study transfer and verification through dicom-skill" width="48%">
-  <img src="screenshot2.png" alt="WhatsApp conversation showing scheduled PACS backup automation and test-run report through dicom-skill" width="48%">
+  <img src="screenshot1.png" alt="WhatsApp conversation showing DICOM study transfer and verification through dicom-skill" width="24%">
+  <img src="screenshot2.png" alt="WhatsApp conversation showing scheduled PACS backup automation and test-run report through dicom-skill" width="24%">
+  <img src="screenshot3.png" alt="Additional dicom-skill workflow screenshot 3" width="24%">
+  <img src="screenshot4.png" alt="Additional dicom-skill workflow screenshot 4" width="24%">
 </p>
 
 ## What it does
@@ -53,6 +55,8 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 ├── LICENSE.txt              # Repository license
 ├── screenshot1.png          # README media
 ├── screenshot2.png          # README media
+├── screenshot3.png          # README media
+├── screenshot4.png          # README media
 └── skill/
     └── dicom-skill/
         ├── SKILL.md                 # Agent-facing operating instructions
@@ -61,7 +65,8 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
         ├── examples/
         │   ├── anonymize-local.md
         │   ├── dicom_nodes.yaml
-        │   └── orthanc-local.md
+        │   ├── orthanc-local.md
+        │   └── pdf-dicomize-local.md
         ├── resources/
         │   └── rsna/                # Bundled RSNA anonymizer script and license
         └── scripts/
