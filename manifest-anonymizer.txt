@@ -1,0 +1,17 @@
+LICENSE.txt
+README.md
+SKILL.md
+examples/anonymize-local.md
+examples/dicom_nodes.yaml
+examples/orthanc-local.md
+manifest.txt
+requirements.txt
+resources/rsna/default-anonymizer.script
+resources/rsna/LICENSE-RSNA-anonymizer.txt
+resources/rsna/README.md
+scripts/dicom_dimse.py
+scripts/dicom_anonymize.py
+scripts/orthanc_temp.py
+scripts/validate_install.py
+screenshot1.png
+screenshot2.png
