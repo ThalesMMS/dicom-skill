@@ -636,17 +636,22 @@ def command_send(args: argparse.Namespace) -> dict[str, Any]:
         result["error"] = "No readable DICOM files with SOPClassUID found."
         return result
 
-    sop_classes: set[str] = set()
+    sop_transfer_syntaxes: dict[str, set[str]] = {}
     for f in files:
         try:
             ds = dcmread(f, stop_before_pixels=True, force=args.force)
-            sop_classes.add(str(ds.SOPClassUID))
+            sop_uid = str(ds.SOPClassUID)
+            transfer_syntax_uid = str(ds.file_meta.TransferSyntaxUID)
+            sop_transfer_syntaxes.setdefault(sop_uid, set()).add(transfer_syntax_uid)
         except Exception as exc:  # noqa: BLE001
-            result["failures"].append({"file": f, "error": f"Could not inspect SOPClassUID: {exc}"})
+            result["failures"].append({"file": f, "error": f"Could not inspect SOPClassUID/TransferSyntaxUID: {exc}"})
 
     ae = make_ae(remote.calling_aet, args.timeout)
-    for sop in sorted(sop_classes):
-        ae.add_requested_context(sop, ALL_TRANSFER_SYNTAXES)
+    for sop, transfer_syntaxes in sorted(sop_transfer_syntaxes.items()):
+        # Request the actual transfer syntax(es) present in the file set. Some
+        # PACS reject or negotiate poorly when offered every known syntax for a
+        # storage SOP class, especially for JPEG2000 or Encapsulated PDF.
+        ae.add_requested_context(sop, sorted(transfer_syntaxes))
     assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet)
     result["established"] = bool(assoc.is_established)
     if not assoc.is_established:

@@ -132,11 +132,11 @@ python scripts/dicom_dimse.py send \
   --path /mnt/data/study_or_file
 ```
 
-For large folders, use `--dry-run` first to verify file discovery.
+For large folders, use `--dry-run` first to verify file discovery. When sending JPEG2000-compressed studies or report objects, use `dicom_dimse.py send` normally; it negotiates the exact transfer syntax present in the files instead of offering every transfer syntax at once.
 
 ### JPEG 2000 local compression/decompression
 
-Use `scripts/dicom_jpeg2000.py` only on local DICOM files. It does not connect to DICOM nodes. The default compression syntax is JPEG 2000 Lossless (`1.2.840.10008.1.2.4.90`).
+Use `scripts/dicom_jpeg2000.py` only on local DICOM files. It does not connect to DICOM nodes. The default compression syntax is JPEG 2000 Lossless (`1.2.840.10008.1.2.4.90`). Non-pixel DICOM objects such as Encapsulated PDF/SR reports are passed through unchanged so complete mixed studies can be compressed and sent as one output folder.
 
 ```bash
 python scripts/dicom_jpeg2000.py compress \

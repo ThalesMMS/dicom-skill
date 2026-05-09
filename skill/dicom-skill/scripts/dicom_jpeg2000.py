@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,11 +174,21 @@ def transform_one(
 
     try:
         ds = dcmread(str(item.source), force=args.force, defer_size="1 KB")
-        if "PixelData" not in ds:
-            raise ValueError("Dataset has no PixelData element.")
-
         source_transfer_syntax = get_transfer_syntax(ds)
         result["source_transfer_syntax"] = uid_to_plain(source_transfer_syntax)
+
+        if "PixelData" not in ds:
+            result["status"] = "passthrough"
+            result["reason"] = "Dataset has no PixelData element; copied unchanged."
+            result["destination_transfer_syntax"] = uid_to_plain(source_transfer_syntax)
+            result["SOPInstanceUID"] = value_to_plain(getattr(ds, "SOPInstanceUID", None))
+            if args.dry_run:
+                result["status"] = "planned_passthrough"
+                return result
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item.source, dest)
+            result["destination_bytes"] = dest.stat().st_size
+            return result
 
         if args.command == "compress":
             target_syntax = UID(str(JPEG2000_SYNTAXES[args.syntax]))
@@ -233,6 +244,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
         "converted_count": sum(1 for item in items if item.get("status") == "converted"),
         "planned_count": sum(1 for item in items if item.get("status") == "planned"),
         "skipped_count": sum(1 for item in items if item.get("status") == "skipped"),
+        "passthrough_count": sum(1 for item in items if item.get("status") in {"passthrough", "planned_passthrough"}),
         "error_count": sum(1 for item in items if item.get("status") == "error"),
         "ok": result.get("ok"),
     }
