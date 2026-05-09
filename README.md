@@ -1,6 +1,6 @@
 # dicom-skill
 
-`dicom-skill` is an agent-ready shell skill for DICOM DIMSE workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, and sending DICOM files between PACS, VNA or other DIMSE-compatible systems.
+`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
 
 This repository is a **skill folder**, not a long-running service. The operational contract lives in [`SKILL.md`](SKILL.md); the scripts in [`scripts/`](scripts/) are meant to be run directly from an agent shell.
 
@@ -17,6 +17,8 @@ This repository is a **skill folder**, not a long-running service. The operation
 - Request C-MOVE transfers to a known destination AE.
 - Start a temporary Orthanc receiver for C-MOVE workflows that need a local destination AE.
 - Send DICOM files or folders with C-STORE.
+- Compress or decompress local DICOM pixel data with JPEG 2000.
+- Render local DICOM instances to PNG preview images.
 - Emit JSON output for audit trails, with an optional PHI-light summary mode for terminal or chat output.
 
 ## Safety model
@@ -30,6 +32,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - Keep retrieved payloads in explicit, user-controlled folders.
 - Preserve JSON/log audit artifacts by default.
 - Do not print full patient data unless the user explicitly asks for it.
+- Treat PNG previews as sensitive because burned-in pixel annotations can remain visible.
 
 Anonymization is out of scope for this skill. If anonymization is needed, run a separate, explicit de-identification workflow.
 
@@ -45,6 +48,8 @@ Anonymization is out of scope for this skill. If anonymization is needed, run a 
 │   └── orthanc-local.md     # Local Orthanc smoke workflow
 └── scripts/
     ├── dicom_dimse.py       # C-ECHO, C-FIND, C-GET/C-MOVE, C-STORE CLI
+    ├── dicom_jpeg2000.py    # Local JPEG 2000 compression/decompression CLI
+    ├── dicom_preview.py     # Local DICOM instance to PNG preview CLI
     ├── orthanc_temp.py      # Temporary Orthanc receiver helper
     └── validate_install.py  # Dependency/import validation
 ```
@@ -56,6 +61,10 @@ Anonymization is out of scope for this skill. If anonymization is needed, run a 
 - `pynetdicom`
 - `requests`
 - `PyYAML`
+- `numpy`
+- `pylibjpeg`
+- `pylibjpeg-openjpeg`
+- `Pillow`
 - Docker, only when using the temporary Orthanc helper
 
 Install from the repository root:
@@ -67,8 +76,10 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE commands only require Python dependencies. Docker is only needed for
-the helper that launches a temporary Orthanc receiver.
+The DIMSE, JPEG 2000, and PNG preview commands only require Python
+dependencies. JPEG 2000 encoding uses `pylibjpeg-openjpeg`; preview rendering
+uses `Pillow`. Docker is only needed for the helper that launches a temporary
+Orthanc receiver.
 
 ## Configuration
 
@@ -230,7 +241,55 @@ AE `AGENT` lives. By default, that means the agent machine must be reachable by
 the remote PACS on DICOM port `4242`. If the remote responds with `0xA801`, the
 move destination is unknown to that node.
 
-### 6. Send files with C-STORE
+### 6. Compress or decompress local files with JPEG 2000
+
+JPEG 2000 transforms are local file operations; they do not connect to a PACS.
+The default compression syntax is JPEG 2000 Lossless
+(`1.2.840.10008.1.2.4.90`).
+
+```bash
+python scripts/dicom_jpeg2000.py compress \
+  --path downloads/study \
+  --out downloads/study_j2k \
+  --summary \
+  --out-json audit/jpeg2000_compress.json
+```
+
+Decompress compressed files to Explicit VR Little Endian:
+
+```bash
+python scripts/dicom_jpeg2000.py decompress \
+  --path downloads/study_j2k \
+  --out downloads/study_uncompressed \
+  --summary \
+  --out-json audit/jpeg2000_decompress.json
+```
+
+For large folders, use `--dry-run --include-files` first. Transcoding generates
+a new SOP Instance UID by default; pass `--keep-instance-uid` only when the
+workflow intentionally preserves the original UID. Lossy JPEG 2000 is opt-in
+with `--syntax lossy` plus `--j2k-cr` or `--j2k-psnr`.
+
+### 7. Render PNG previews from local instances
+
+Preview rendering is a local file operation; it does not connect to a PACS. For
+grayscale images, the script applies Modality LUT and VOI LUT/windowing when
+available and handles `MONOCHROME1` inversion.
+
+```bash
+python scripts/dicom_preview.py \
+  --path downloads/study/instance.dcm \
+  --out previews/study \
+  --summary \
+  --out-json audit/preview_instance.json
+```
+
+For multiframe instances, the default is the first frame. Use `--frame 5` for a
+specific 1-based frame or `--all-frames` to render every frame. Use
+`--max-size 1024` for compact review PNGs, or override grayscale display with
+`--window-center` and `--window-width`.
+
+### 8. Send files with C-STORE
 
 Discover readable DICOM files before sending:
 
@@ -285,16 +344,16 @@ destination.
 
 ## Output and audit files
 
-All DIMSE commands print JSON. Use:
+All DIMSE, JPEG 2000, and PNG preview commands print JSON. Use:
 
 - `--summary` for concise, PHI-light terminal output.
 - `--out-json path/to/result.json` to persist the full result for audit/debugging.
 - Explicit output directories such as `downloads/` or `audit/` for retrieved
   payloads and command results.
 
-After successful verification, remove temporary ZIP or DICOM payload folders that
-were created only for the operation. Keep JSON summaries, command logs, and UID
-lists unless the user asks to remove them.
+After successful verification, remove temporary ZIP, DICOM payload, or PNG
+preview folders that were created only for the operation. Keep JSON summaries,
+command logs, and UID lists unless the user asks to remove them.
 
 ## Troubleshooting
 
@@ -325,6 +384,17 @@ C-GET when appropriate.
 Check that Docker is installed and running, the `orthancteam/orthanc` image can
 be pulled, and ports `4242` and `8042` are free.
 
+**JPEG 2000 compression fails**
+
+Run `python scripts/validate_install.py` and check the `codecs.jpeg2000` block.
+Encoding requires `numpy`, `pylibjpeg`, and `pylibjpeg-openjpeg`.
+
+**PNG preview fails on compressed input**
+
+Run `python scripts/validate_install.py` and check the pixel decoder details.
+JPEG 2000 and other compressed transfer syntaxes require an available pydicom
+pixel decoder.
+
 ## Development notes
 
 Validate the local install:
@@ -338,6 +408,8 @@ Inspect command help:
 ```bash
 python scripts/dicom_dimse.py --help
 python scripts/dicom_dimse.py query --help
+python scripts/dicom_jpeg2000.py --help
+python scripts/dicom_preview.py --help
 python scripts/orthanc_temp.py --help
 ```
 

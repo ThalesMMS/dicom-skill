@@ -6,5 +6,7 @@ examples/orthanc-local.md
 manifest.txt
 requirements.txt
 scripts/dicom_dimse.py
+scripts/dicom_jpeg2000.py
+scripts/dicom_preview.py
 scripts/orthanc_temp.py
 scripts/validate_install.py

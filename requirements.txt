@@ -2,3 +2,7 @@ pydicom>=3.0.0
 pynetdicom>=3.0.0,<4
 requests>=2.31.0
 PyYAML>=6.0.1
+numpy>=1.26
+pylibjpeg>=2.0
+pylibjpeg-openjpeg>=2.2
+Pillow>=10.0

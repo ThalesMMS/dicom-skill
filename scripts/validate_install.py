@@ -9,12 +9,63 @@ import socket
 import subprocess
 import sys
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 
-def package_version(module_name: str) -> str:
+def package_version(module_name: str, distribution_name: str | None = None) -> str:
     module = import_module(module_name)
+    if distribution_name:
+        try:
+            return version(distribution_name)
+        except PackageNotFoundError:
+            pass
     return str(getattr(module, "__version__", "unknown"))
+
+
+def jpeg2000_codec_info() -> dict[str, Any]:
+    try:
+        from pydicom.pixels.decoders import JPEG2000Decoder, JPEG2000LosslessDecoder
+        from pydicom.pixels.encoders import JPEG2000Encoder, JPEG2000LosslessEncoder
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    encoders_ok = bool(JPEG2000LosslessEncoder.is_available and JPEG2000Encoder.is_available)
+    decoders_ok = bool(JPEG2000LosslessDecoder.is_available and JPEG2000Decoder.is_available)
+    return {
+        "ok": encoders_ok and decoders_ok,
+        "encoders_ok": encoders_ok,
+        "decoders_ok": decoders_ok,
+        "encoder_plugins": {
+            "lossless": list(JPEG2000LosslessEncoder.available_plugins),
+            "lossy": list(JPEG2000Encoder.available_plugins),
+        },
+        "decoder_plugins": {
+            "lossless": list(JPEG2000LosslessDecoder.available_plugins),
+            "lossy": list(JPEG2000Decoder.available_plugins),
+        },
+        "missing_encoder_dependencies": {
+            "lossless": list(JPEG2000LosslessEncoder.missing_dependencies),
+            "lossy": list(JPEG2000Encoder.missing_dependencies),
+        },
+        "missing_decoder_dependencies": {
+            "lossless": list(JPEG2000LosslessDecoder.missing_dependencies),
+            "lossy": list(JPEG2000Decoder.missing_dependencies),
+        },
+    }
+
+
+def preview_info() -> dict[str, Any]:
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": "PNG" in Image.registered_extensions().values(),
+        "numpy_version": str(getattr(np, "__version__", "unknown")),
+        "pillow_version": str(getattr(Image, "__version__", "unknown")),
+        "png_writer": "PNG" in Image.registered_extensions().values(),
+    }
 
 
 def docker_info() -> dict[str, Any]:
@@ -42,13 +93,29 @@ def port_busy(port: int) -> bool:
 
 
 def main() -> int:
-    result: dict[str, Any] = {"ok": True, "packages": {}, "docker": {}, "ports": {}}
-    for name in ["pydicom", "pynetdicom", "requests", "yaml"]:
+    result: dict[str, Any] = {"ok": True, "packages": {}, "codecs": {}, "docker": {}, "ports": {}}
+    packages = [
+        ("pydicom", None, "pydicom"),
+        ("pynetdicom", None, "pynetdicom"),
+        ("requests", None, "requests"),
+        ("yaml", "PyYAML", "PyYAML"),
+        ("numpy", None, "numpy"),
+        ("pylibjpeg", None, "pylibjpeg"),
+        ("openjpeg", "pylibjpeg-openjpeg", "pylibjpeg-openjpeg"),
+        ("PIL", "Pillow", "Pillow"),
+    ]
+    for module_name, distribution_name, display_name in packages:
         try:
-            result["packages"][name] = {"ok": True, "version": package_version(name)}
+            result["packages"][display_name] = {"ok": True, "version": package_version(module_name, distribution_name)}
         except Exception as exc:  # noqa: BLE001
             result["ok"] = False
-            result["packages"][name] = {"ok": False, "error": str(exc)}
+            result["packages"][display_name] = {"ok": False, "error": str(exc)}
+    result["codecs"]["jpeg2000"] = jpeg2000_codec_info()
+    if not result["codecs"]["jpeg2000"].get("ok"):
+        result["ok"] = False
+    result["codecs"]["preview_png"] = preview_info()
+    if not result["codecs"]["preview_png"].get("ok"):
+        result["ok"] = False
     result["docker"] = docker_info()
     result["ports"] = {"4242_busy": port_busy(4242), "8042_busy": port_busy(8042)}
     print(json.dumps(result, indent=2, ensure_ascii=False))
