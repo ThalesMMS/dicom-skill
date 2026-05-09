@@ -1,5 +1,3 @@
-LICENSE.txt
-README.md
 SKILL.md
 examples/anonymize-local.md
 examples/dicom_nodes.yaml

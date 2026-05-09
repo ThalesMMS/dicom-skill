@@ -2,7 +2,13 @@
 
 `dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
 
-This repository is a **skill folder**, not a long-running service. The operational contract lives in [`SKILL.md`](SKILL.md); the scripts in [`scripts/`](scripts/) are meant to be run directly from an agent shell.
+This repository contains the publishable skill package under
+[`skill/dicom-skill/`](skill/dicom-skill/). The repository root holds GitHub
+presentation files such as this README, the license, and screenshots. The
+operational contract lives in
+[`skill/dicom-skill/SKILL.md`](skill/dicom-skill/SKILL.md); the scripts in
+[`skill/dicom-skill/scripts/`](skill/dicom-skill/scripts/) are meant to be run
+directly from an agent shell.
 
 <p align="center">
   <img src="screenshot1.png" alt="WhatsApp conversation showing DICOM study transfer and verification through dicom-skill" width="48%">
@@ -41,22 +47,28 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 
 ```text
 .
-├── SKILL.md                 # Agent-facing operating instructions
-├── README.md                # Project overview
-├── requirements.txt         # Python runtime dependencies
-├── examples/
-│   ├── anonymize-local.md   # Local anonymization example
-│   ├── dicom_nodes.yaml     # Example node configuration
-│   └── orthanc-local.md     # Local Orthanc smoke workflow
-├── resources/
-│   └── rsna/                # Bundled RSNA anonymizer script and license
-└── scripts/
-    ├── dicom_dimse.py       # C-ECHO, C-FIND, C-GET/C-MOVE, C-STORE CLI
-    ├── dicom_anonymize.py   # Local DICOM anonymization CLI
-    ├── dicom_jpeg2000.py    # Local JPEG 2000 compression/decompression CLI
-    ├── dicom_preview.py     # Local DICOM instance to PNG preview CLI
-    ├── orthanc_temp.py      # Temporary Orthanc receiver helper
-    └── validate_install.py  # Dependency/import validation
+├── README.md                # GitHub/project overview
+├── LICENSE.txt              # Repository license
+├── screenshot1.png          # README media
+├── screenshot2.png          # README media
+└── skill/
+    └── dicom-skill/
+        ├── SKILL.md                 # Agent-facing operating instructions
+        ├── manifest.txt             # Skill package manifest
+        ├── requirements.txt         # Python runtime dependencies
+        ├── examples/
+        │   ├── anonymize-local.md
+        │   ├── dicom_nodes.yaml
+        │   └── orthanc-local.md
+        ├── resources/
+        │   └── rsna/                # Bundled RSNA anonymizer script and license
+        └── scripts/
+            ├── dicom_dimse.py
+            ├── dicom_anonymize.py
+            ├── dicom_jpeg2000.py
+            ├── dicom_preview.py
+            ├── orthanc_temp.py
+            └── validate_install.py
 ```
 
 ## Requirements
@@ -72,9 +84,10 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - `Pillow`
 - Docker, only when using the temporary Orthanc helper
 
-Install from the repository root:
+Install from the skill package folder:
 
 ```bash
+cd skill/dicom-skill
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -85,6 +98,9 @@ The DIMSE, anonymization, JPEG 2000, and PNG preview commands only require
 Python dependencies. JPEG 2000 encoding uses `pylibjpeg-openjpeg`; preview
 rendering uses `Pillow`. Docker is only needed for the helper that launches a
 temporary Orthanc receiver.
+
+All command examples below assume the current working directory is
+`skill/dicom-skill/`.
 
 ## Configuration
 
@@ -456,14 +472,17 @@ python scripts/dicom_preview.py --help
 python scripts/orthanc_temp.py --help
 ```
 
-For local smoke flows, see [`examples/orthanc-local.md`](examples/orthanc-local.md)
-and [`examples/anonymize-local.md`](examples/anonymize-local.md).
+For local smoke flows, see
+[`skill/dicom-skill/examples/orthanc-local.md`](skill/dicom-skill/examples/orthanc-local.md)
+and
+[`skill/dicom-skill/examples/anonymize-local.md`](skill/dicom-skill/examples/anonymize-local.md).
 
 ## RSNA anonymizer note
 
 The bundled anonymization script is derived from the RSNA DICOM Anonymizer
 project at <https://github.com/RSNA/anonymizer>. Copied RSNA material lives in
-`resources/rsna/` and includes the original Apache 2.0 license.
+`skill/dicom-skill/resources/rsna/` and includes the original Apache 2.0
+license.
 
 ## License
 
