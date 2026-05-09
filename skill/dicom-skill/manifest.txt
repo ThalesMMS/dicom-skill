@@ -2,6 +2,7 @@ SKILL.md
 examples/anonymize-local.md
 examples/dicom_nodes.yaml
 examples/orthanc-local.md
+examples/pdf-dicomize-local.md
 manifest.txt
 requirements.txt
 resources/rsna/default-anonymizer.script
@@ -10,6 +11,7 @@ resources/rsna/README.md
 scripts/dicom_anonymize.py
 scripts/dicom_dimse.py
 scripts/dicom_jpeg2000.py
+scripts/dicom_pdf.py
 scripts/dicom_preview.py
 scripts/orthanc_temp.py
 scripts/validate_install.py

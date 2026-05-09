@@ -1,6 +1,6 @@
 # dicom-skill
 
-`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
+`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, wrapping PDFs as DICOM Encapsulated PDF instances, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
 
 This repository contains the publishable skill package under
 [`skill/dicom-skill/`](skill/dicom-skill/). The repository root holds GitHub
@@ -24,6 +24,7 @@ directly from an agent shell.
 - Start a temporary Orthanc receiver for C-MOVE workflows that need a local destination AE.
 - Send DICOM files or folders with C-STORE.
 - Anonymize local DICOM files or folders with an RSNA-anonymizer-derived script workflow.
+- Wrap local PDFs as DICOM Encapsulated PDF Storage instances.
 - Compress or decompress local DICOM pixel data with JPEG 2000.
 - Render local DICOM instances to PNG preview images.
 - Emit JSON output for audit trails, with an optional PHI-light summary mode for terminal or chat output.
@@ -41,6 +42,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - Do not print full patient data unless the user explicitly asks for it.
 - Treat anonymization as an explicit, local file operation. Do not assume retrieved data is anonymous until `scripts/dicom_anonymize.py` has been run and the result has been checked.
 - The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
+- Treat dicomized PDFs as sensitive because the PDF bytes are embedded as-is.
 - Treat PNG previews as sensitive because burned-in pixel annotations can remain visible.
 
 ## Repository layout
@@ -66,6 +68,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
             ├── dicom_dimse.py
             ├── dicom_anonymize.py
             ├── dicom_jpeg2000.py
+            ├── dicom_pdf.py
             ├── dicom_preview.py
             ├── orthanc_temp.py
             └── validate_install.py
@@ -94,10 +97,10 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE, anonymization, JPEG 2000, and PNG preview commands only require
-Python dependencies. JPEG 2000 encoding uses `pylibjpeg-openjpeg`; preview
-rendering uses `Pillow`. Docker is only needed for the helper that launches a
-temporary Orthanc receiver.
+The DIMSE, anonymization, PDF dicomizer, JPEG 2000, and PNG preview commands
+only require Python dependencies. JPEG 2000 encoding uses
+`pylibjpeg-openjpeg`; preview rendering uses `Pillow`. Docker is only needed
+for the helper that launches a temporary Orthanc receiver.
 
 All command examples below assume the current working directory is
 `skill/dicom-skill/`.
@@ -333,7 +336,38 @@ runs; the mapping file can contain PHI because original identifiers may be used
 as keys. The anonymizer marks datasets with `PatientIdentityRemoved=YES`, but it
 does not remove burned-in pixel annotations or run OCR.
 
-### 9. Send files with C-STORE
+### 9. Wrap PDFs as DICOM Encapsulated PDF
+
+Use `scripts/dicom_pdf.py` only on local PDF files. It writes DICOM
+Encapsulated PDF Storage instances without changing the PDF contents.
+
+```bash
+python scripts/dicom_pdf.py \
+  --pdf reports/report.pdf \
+  --out dicomized/pdf \
+  --patient-id TEST123 \
+  --patient-name "Test^Patient" \
+  --summary \
+  --out-json audit/pdf_dicomize.json
+```
+
+To attach a PDF to an existing study, copy patient/study metadata from a
+reference DICOM instance:
+
+```bash
+python scripts/dicom_pdf.py \
+  --pdf reports/report.pdf \
+  --metadata-from downloads/study/instance.dcm \
+  --out dicomized/pdf \
+  --document-title "Final report" \
+  --summary
+```
+
+The output uses `SOPClassUID=EncapsulatedPDFStorage`,
+`MIMETypeOfEncapsulatedDocument=application/pdf`, and `BurnedInAnnotation=YES`
+by default because the embedded PDF may contain visible PHI.
+
+### 10. Send files with C-STORE
 
 Discover readable DICOM files before sending:
 
@@ -388,7 +422,7 @@ destination.
 
 ## Output and audit files
 
-All DIMSE, anonymization, JPEG 2000, and PNG preview commands print JSON. Use:
+All DIMSE, anonymization, PDF dicomizer, JPEG 2000, and PNG preview commands print JSON. Use:
 
 - `--summary` for concise, PHI-light terminal output.
 - `--out-json path/to/result.json` to persist the full result for audit/debugging.
@@ -443,6 +477,11 @@ Run `python scripts/validate_install.py` and check the pixel decoder details.
 JPEG 2000 and other compressed transfer syntaxes require an available pydicom
 pixel decoder.
 
+**PDF dicomizer output still contains visible patient data**
+
+The PDF is embedded as-is in `EncapsulatedDocument`. Redact/de-identify PDF
+contents separately before dicomizing if needed.
+
 **Anonymized files still contain visible burned-in annotations**
 
 This skill's anonymizer does not run OCR or pixel masking. Do not share previews
@@ -468,6 +507,7 @@ python scripts/dicom_dimse.py --help
 python scripts/dicom_dimse.py query --help
 python scripts/dicom_anonymize.py --help
 python scripts/dicom_jpeg2000.py --help
+python scripts/dicom_pdf.py --help
 python scripts/dicom_preview.py --help
 python scripts/orthanc_temp.py --help
 ```
@@ -476,6 +516,8 @@ For local smoke flows, see
 [`skill/dicom-skill/examples/orthanc-local.md`](skill/dicom-skill/examples/orthanc-local.md)
 and
 [`skill/dicom-skill/examples/anonymize-local.md`](skill/dicom-skill/examples/anonymize-local.md).
+For PDF wrapping, see
+[`skill/dicom-skill/examples/pdf-dicomize-local.md`](skill/dicom-skill/examples/pdf-dicomize-local.md).
 
 ## RSNA anonymizer note
 

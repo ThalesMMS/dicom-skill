@@ -86,6 +86,18 @@ def rsna_script_info() -> dict[str, Any]:
         return {"available": False, "path": str(script_path), "reason": str(exc)}
 
 
+def pdf_dicomizer_info() -> dict[str, Any]:
+    try:
+        from pydicom.uid import EncapsulatedPDFStorage
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": str(EncapsulatedPDFStorage) == "1.2.840.10008.5.1.4.1.1.104.1",
+        "sop_class_uid": str(EncapsulatedPDFStorage),
+        "sop_class_name": EncapsulatedPDFStorage.name,
+    }
+
+
 def docker_info() -> dict[str, Any]:
     docker_path = shutil.which("docker")
     if not docker_path:
@@ -140,6 +152,9 @@ def main() -> int:
         result["ok"] = False
     result["codecs"]["preview_png"] = preview_info()
     if not result["codecs"]["preview_png"].get("ok"):
+        result["ok"] = False
+    result["codecs"]["pdf_dicomizer"] = pdf_dicomizer_info()
+    if not result["codecs"]["pdf_dicomizer"].get("ok"):
         result["ok"] = False
     result["rsna_anonymizer_script"] = rsna_script_info()
     if not result["rsna_anonymizer_script"].get("available"):
