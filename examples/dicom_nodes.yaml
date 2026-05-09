@@ -1,0 +1,13 @@
+calling_aet: AGENT
+current_node: orthanc
+nodes:
+  orthanc:
+    host: localhost
+    port: 4242
+    ae_title: ORTHANC
+    description: Local Orthanc DICOM node
+  pacs:
+    host: pacs.example.local
+    port: 104
+    ae_title: PACS
+    description: Example PACS node; replace before use
