@@ -70,7 +70,7 @@ Common levels: `PATIENT`, `STUDY`, `SERIES`, `IMAGE` (`INSTANCE` is accepted as 
 
 ### Retrieve with C-GET
 
-Use C-GET for local downloads when there is no known/registered destination AE. It does not require the remote PACS to know a separate destination AE, but some PACS reject many C-STORE suboperations during C-GET. If the final status has failed suboperations or the received count is lower than expected, do **not** assume the study was copied; try C-MOVE to a known destination AE and verify there.
+Use C-GET for local downloads when there is no known/registered destination AE. It does not require the remote PACS to know a separate destination AE, but some PACS reject many C-STORE suboperations during C-GET. If the source study uses only a known SOP Class (for example CT Image Storage), you can narrow incoming C-STORE negotiation with one or more `--store-sop-class` flags to avoid exceeding the association presentation-context limit. If the final status has failed suboperations or the received count is lower than expected, do **not** assume the study was copied; try C-MOVE to a known destination AE and verify there.
 
 ```bash
 python scripts/dicom_dimse.py retrieve \

@@ -465,11 +465,37 @@ def safe_path_component(value: Any, fallback: str) -> str:
     return "".join(keep)[:180] or fallback
 
 
-def configure_storage_contexts_for_get(ae: AE) -> list[Any]:
+def configure_storage_contexts_for_get(ae: AE, sop_classes: list[str] | None = None) -> list[Any]:
+    """Configure incoming C-STORE contexts for C-GET.
+
+    Requesting every Storage Presentation Context can exceed the DICOM maximum
+    number of requested presentation contexts for a single association. Allow a
+    focused SOP Class list when known, and otherwise cap the fallback list to a
+    safe subset under the protocol limit.
+    """
     roles = []
-    for cx in StoragePresentationContexts:
-        ae.add_requested_context(cx.abstract_syntax, ALL_TRANSFER_SYNTAXES)
-        roles.append(build_role(cx.abstract_syntax, scp_role=True))
+    if sop_classes:
+        requested = []
+        seen: set[str] = set()
+        for sop in sop_classes:
+            uid = str(UID(str(sop)))
+            if uid in seen:
+                continue
+            requested.append(uid)
+            seen.add(uid)
+    else:
+        requested = [str(cx.abstract_syntax) for cx in StoragePresentationContexts[:120]]
+
+    common_transfer_syntaxes = [
+        "1.2.840.10008.1.2",      # Implicit VR Little Endian
+        "1.2.840.10008.1.2.1",    # Explicit VR Little Endian
+        "1.2.840.10008.1.2.1.99", # Deflated Explicit VR Little Endian
+        "1.2.840.10008.1.2.2",    # Explicit VR Big Endian
+    ]
+
+    for sop_class in requested:
+        ae.add_requested_context(sop_class, common_transfer_syntaxes)
+        roles.append(build_role(sop_class, scp_role=True))
     return roles
 
 
@@ -479,7 +505,7 @@ def command_retrieve_get(args: argparse.Namespace, remote: RemoteNode, identifie
     model = GET_MODELS[model_key]
     ae = make_ae(remote.calling_aet, args.timeout)
     ae.add_requested_context(model)
-    roles = configure_storage_contexts_for_get(ae)
+    roles = configure_storage_contexts_for_get(ae, args.store_sop_class or None)
     received: list[str] = []
     store_errors: list[dict[str, Any]] = []
     counter = {"n": 0}
@@ -508,6 +534,7 @@ def command_retrieve_get(args: argparse.Namespace, remote: RemoteNode, identifie
         "model": model_key,
         "identifier": dataset_to_plain(identifier),
         "out_dir": str(out_dir),
+        "store_sop_classes": list(args.store_sop_class or []),
         "established": bool(assoc.is_established),
         "responses": [],
         "received": received,
@@ -714,6 +741,7 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_p.add_argument("--series-uid")
     retrieve_p.add_argument("--sop-uid")
     retrieve_p.add_argument("--filter", action="append", default=[], help="Additional retrieve key, KEY=VALUE; can be repeated")
+    retrieve_p.add_argument("--store-sop-class", action="append", default=[], help="Limit incoming C-STORE negotiation for C-GET to these SOP Class UIDs; repeat as needed")
     retrieve_p.add_argument("--out", required=True, help="Directory for retrieved/exported DICOM files")
     retrieve_p.add_argument("--destination-aet", default="AGENT", help="C-MOVE destination AE title")
     retrieve_p.add_argument("--use-temp-orthanc", dest="use_temp_orthanc", action="store_true", default=None)
