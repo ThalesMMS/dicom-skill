@@ -1,17 +1,17 @@
 ---
 name: dicom-skill
-description: Perform DICOM DIMSE C-ECHO, C-FIND, C-GET/C-MOVE retrieval, C-STORE send operations, local DICOM anonymization, PDF-to-DICOM encapsulation, JPEG 2000 compression/decompression, and DICOM-to-PNG preview rendering from an agent shell. Includes helper scripts to create a temporary Orthanc receiver with AE title AGENT on DICOM port 4242 when a C-MOVE destination is needed.
+description: Perform DICOM DIMSE C-ECHO, C-FIND, C-GET/C-MOVE retrieval, C-STORE send operations, local DICOM anonymization, PDF-to-DICOM encapsulation, JPEG 2000 compression/decompression, DICOM-to-PNG preview rendering, and local DICOM image-series MP4 export from an agent shell. Includes helper scripts to create a temporary Orthanc receiver with AE title AGENT on DICOM port 4242 when a C-MOVE destination is needed.
 ---
 
 # dicom-skill
 
-Use this skill when the user asks an agent to interact with DICOM nodes/PACS/VNA/Orthanc using DIMSE operations: verify connectivity, query metadata, retrieve instances, send DICOM files, anonymize local DICOM files, wrap local PDFs as DICOM Encapsulated PDF instances, locally compress/decompress DICOM pixel data with JPEG 2000, or render local DICOM instances to PNG previews.
+Use this skill when the user asks an agent to interact with DICOM nodes/PACS/VNA/Orthanc using DIMSE operations: verify connectivity, query metadata, retrieve instances, send DICOM files, anonymize local DICOM files, wrap local PDFs as DICOM Encapsulated PDF instances, locally compress/decompress DICOM pixel data with JPEG 2000, render local DICOM instances to PNG previews, or export local DICOM image series to MP4 videos.
 
 This is a shell/CLI skill, not an MCP server. Do not start an MCP server. Use the scripts in `scripts/` directly.
 
 ## Safety and data handling
 
-DICOM metadata and files can contain patient-identifying information. Do not connect to clinical systems, retrieve studies, send images, anonymize clinical payloads, or encapsulate PDFs as DICOM unless the user has authorization and has provided the endpoint or file details. Keep outputs in local, user-controlled folders. Avoid printing full patient data unless the user explicitly asks for it. PNG previews and encapsulated PDFs can preserve visible PHI already present in pixel data or document contents. Anonymization must be an explicit local file operation; never assume retrieved, received, or dicomized files are de-identified until `scripts/dicom_anonymize.py` has been run and checked.
+DICOM metadata and files can contain patient-identifying information. Do not connect to clinical systems, retrieve studies, send images, anonymize clinical payloads, export videos, or encapsulate PDFs as DICOM unless the user has authorization and has provided the endpoint or file details. Keep outputs in local, user-controlled folders. Avoid printing full patient data unless the user explicitly asks for it. PNG previews, MP4 videos, and encapsulated PDFs can preserve visible PHI already present in pixel data or document contents. Anonymization must be an explicit local file operation; never assume retrieved, received, dicomized, previewed, or video-exported files are de-identified until `scripts/dicom_anonymize.py` has been run and checked.
 
 For troubleshooting, prefer C-ECHO first. For data movement, prefer the least invasive operation that satisfies the request. When the user wants to copy studies from one DICOM node to another known DICOM destination, prefer C-MOVE directly to that destination AE over C-GET + C-STORE. Never delete, overwrite, or modify remote DICOM data from this skill. The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
 
@@ -26,7 +26,7 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE, anonymization, PDF dicomizer, JPEG 2000, and PNG preview scripts require Python packages only. JPEG 2000 encoding requires `pylibjpeg-openjpeg`; PNG preview rendering requires `Pillow`. The temporary Orthanc helper requires Docker and the `orthancteam/orthanc` image, pulled automatically by Docker if absent.
+The DIMSE, anonymization, PDF dicomizer, JPEG 2000, PNG preview, and MP4 export scripts require Python packages only. JPEG 2000 encoding requires `pylibjpeg-openjpeg`; PNG preview rendering requires `Pillow`; MP4 export requires `imageio` and `imageio-ffmpeg`. The temporary Orthanc helper requires Docker and the `orthancteam/orthanc` image, pulled automatically by Docker if absent.
 
 ## Configuration
 
@@ -169,6 +169,54 @@ python scripts/dicom_preview.py \
 
 For multiframe instances, the default is the first frame. Use `--frame 5` for a specific 1-based frame or `--all-frames` to render every frame. Use `--max-size 1024` for a smaller preview, or manual grayscale windowing with `--window-center` and `--window-width`.
 
+### DICOM image series to MP4
+
+Use `scripts/dicom_volume_video.py` to export local DICOM image series from a study folder to MP4. By default it applies modality-specific automatic policies:
+
+- CT: export series with more than 100 images at 10 frames/sec.
+- MR: export series with 15-100 images at 3 frames/sec.
+- MR: export series with more than 100 images at 10 frames/sec.
+- Other modalities: list the study series and ask the user which series and frame rate to export.
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path /mnt/data/dicom_downloads/study \
+  --out /mnt/data/videos \
+  --summary --out-json /mnt/data/audit/video_export.json
+```
+
+To inspect available series before export:
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path /mnt/data/dicom_downloads/study \
+  --out /mnt/data/videos \
+  --list-series --include-descriptions \
+  --summary --out-json /mnt/data/audit/series_list.json
+```
+
+To export one or more specific series, use `--series-uid`, `--series-number`, or `--series-description-contains`. For modalities other than CT or MR, include `--frame-rate` after asking the user for the desired playback speed:
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path /mnt/data/dicom_downloads/study \
+  --out /mnt/data/videos \
+  --series-number 3 \
+  --plane axial --plane sagittal --plane coronal \
+  --frame-rate 15 \
+  --summary --out-json /mnt/data/audit/video_series3.json
+```
+
+The script applies grayscale Modality LUT/rescale, uses manual `--window-center/--window-width` when supplied, otherwise uses DICOM window values when present, and falls back to percentile/min-max normalization. Use `--percentile-window 0.5,99.5`, `--max-size`, `--reverse`, or `--overwrite` when needed. MP4 exports can contain burned-in annotations and must be treated as sensitive.
+
+Selection rules:
+
+- Without a series selector, export only CT/MR series matching the automatic policy.
+- With `--series-uid`, `--series-number`, or `--series-description-contains`, export matching series even when they do not match automatic thresholds.
+- For selected non-CT/non-MR series, `--frame-rate` is required.
+- Without `--plane`, export only axial MP4 output. Use repeated `--plane` flags or comma-separated values for sagittal and coronal output.
+- Without `--frame-rate`, use the CT/MR modality default only when one exists.
+
 ### PDF dicomizer
 
 Use `scripts/dicom_pdf.py` to wrap a local PDF as a DICOM Encapsulated PDF Storage instance (`1.2.840.10008.5.1.4.1.1.104.1`). It does not OCR, rasterize, inspect, or anonymize the PDF contents.
@@ -211,6 +259,7 @@ Typical temporary payloads to remove:
 - Local C-GET/download folders such as `$AUDIT/downloads`
 - Temporary C-MOVE/export payload folders such as `$AUDIT/move_out`
 - Local preview folders such as `$AUDIT/previews`
+- Temporary local MP4 export test folders such as `$AUDIT/video_test_exports`
 - Local PDF dicomizer output folders such as `$AUDIT/dicomized_pdf`
 - Workspace-local copies of inbound ZIPs, if any were created only for the operation
 
@@ -219,13 +268,13 @@ Do not delete anonymized exports or mapping JSON files unless the user explicitl
 Prefer a recoverable delete when available:
 
 ```bash
-for p in "$AUDIT/extracted" "$AUDIT/downloads" "$AUDIT/move_out" "$AUDIT/previews"; do
+for p in "$AUDIT/extracted" "$AUDIT/downloads" "$AUDIT/move_out" "$AUDIT/previews" "$AUDIT/video_test_exports"; do
   [ -e "$p" ] || continue
   if command -v trash >/dev/null 2>&1; then trash "$p"; else rm -rf "$p"; fi
 done
 ```
 
-Only remove paths inside the explicit workspace/audit directory for the current operation. Never delete remote DICOM data, user source archives outside the workspace, or audit logs by default.
+Only remove paths inside the explicit workspace/audit directory for the current operation. Never delete remote DICOM data, user source archives outside the workspace, requested MP4 exports, anonymized payloads, or audit logs by default.
 
 ## Temporary Orthanc helper
 
@@ -251,9 +300,10 @@ The helper exposes Orthanc REST only on `127.0.0.1:8042` by default, while DICOM
 7. For local JPEG 2000 compression/decompression, keep source and output folders separate, run a dry-run on large folders, and persist the JSON result with `--out-json`.
 8. For PDF dicomization, keep PDF sources and generated DICOM output separate, prefer `--metadata-from` when attaching to an existing study, and do not claim PDF contents were anonymized.
 9. For PNG preview rendering, keep previews in an explicit output folder, use `--max-size` when a compact visual check is enough, and remember burned-in pixel annotations can remain visible.
-10. For send, verify the destination with C-ECHO, run a dry-run on the file set, then send. If the user requests anonymized transfer, send only from the anonymized output directory.
-11. Save full command output JSON with `--out-json` for auditability and use `--summary` for terminal/chat output on large studies.
-12. After successful verification, clear temporary ZIP/DICOM/PDF/PNG payload files created in the workspace while preserving audit JSON/logs by default.
+10. For MP4 export, run `--list-series` when the user has not provided a specific series and the folder may contain multiple studies or non-CT/non-MR modalities. Default CT to series with more than 100 images at 10 frames/sec. Default MR to 15-100 images at 3 frames/sec and more than 100 images at 10 frames/sec. For other modalities, ask which series and frame rate to export before running the export command.
+11. For send, verify the destination with C-ECHO, run a dry-run on the file set, then send. If the user requests anonymized transfer, send only from the anonymized output directory.
+12. Save full command output JSON with `--out-json` for auditability and use `--summary` for terminal/chat output on large studies.
+13. After successful verification, clear temporary ZIP/DICOM/PDF/PNG payload files created in the workspace while preserving audit JSON/logs and requested MP4 exports by default.
 
 ## Troubleshooting
 

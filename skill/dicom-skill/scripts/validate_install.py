@@ -70,6 +70,29 @@ def preview_info() -> dict[str, Any]:
     }
 
 
+def video_info() -> dict[str, Any]:
+    try:
+        import imageio
+        import imageio_ffmpeg
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    try:
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "imageio_version": str(getattr(imageio, "__version__", "unknown")),
+            "imageio_ffmpeg_version": str(getattr(imageio_ffmpeg, "__version__", "unknown")),
+            "error": str(exc),
+        }
+    return {
+        "ok": True,
+        "imageio_version": str(getattr(imageio, "__version__", "unknown")),
+        "imageio_ffmpeg_version": str(getattr(imageio_ffmpeg, "__version__", "unknown")),
+        "ffmpeg_path": ffmpeg_path,
+    }
+
+
 def rsna_script_info() -> dict[str, Any]:
     script_path = Path(__file__).resolve().parent.parent / "resources" / "rsna" / "default-anonymizer.script"
     if not script_path.exists():
@@ -140,6 +163,8 @@ def main() -> int:
         ("pylibjpeg", None, "pylibjpeg"),
         ("openjpeg", "pylibjpeg-openjpeg", "pylibjpeg-openjpeg"),
         ("PIL", "Pillow", "Pillow"),
+        ("imageio", None, "imageio"),
+        ("imageio_ffmpeg", "imageio-ffmpeg", "imageio-ffmpeg"),
     ]
     for module_name, distribution_name, display_name in packages:
         try:
@@ -152,6 +177,9 @@ def main() -> int:
         result["ok"] = False
     result["codecs"]["preview_png"] = preview_info()
     if not result["codecs"]["preview_png"].get("ok"):
+        result["ok"] = False
+    result["codecs"]["video_mp4"] = video_info()
+    if not result["codecs"]["video_mp4"].get("ok"):
         result["ok"] = False
     result["codecs"]["pdf_dicomizer"] = pdf_dicomizer_info()
     if not result["codecs"]["pdf_dicomizer"].get("ok"):

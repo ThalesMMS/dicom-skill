@@ -1,5 +1,6 @@
 SKILL.md
 examples/anonymize-local.md
+examples/series-video-local.md
 examples/dicom_nodes.yaml
 examples/orthanc-local.md
 examples/pdf-dicomize-local.md
@@ -13,5 +14,6 @@ scripts/dicom_dimse.py
 scripts/dicom_jpeg2000.py
 scripts/dicom_pdf.py
 scripts/dicom_preview.py
+scripts/dicom_volume_video.py
 scripts/orthanc_temp.py
 scripts/validate_install.py

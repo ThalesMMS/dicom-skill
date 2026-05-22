@@ -1,6 +1,6 @@
 # dicom-skill
 
-`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, wrapping PDFs as DICOM Encapsulated PDF instances, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, and rendering PNG previews from local instances.
+`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, wrapping PDFs as DICOM Encapsulated PDF instances, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, rendering PNG previews from local instances, and exporting local DICOM image series to MP4 videos.
 
 This repository contains the publishable skill package under
 [`skill/dicom-skill/`](skill/dicom-skill/). The repository root holds GitHub
@@ -29,6 +29,7 @@ directly from an agent shell.
 - Wrap local PDFs as DICOM Encapsulated PDF Storage instances.
 - Compress or decompress local DICOM pixel data with JPEG 2000.
 - Render local DICOM instances to PNG preview images.
+- Export local DICOM image series to MP4, with automatic CT and MR defaults and explicit selection for other modalities.
 - Emit JSON output for audit trails, with an optional PHI-light summary mode for terminal or chat output.
 
 ## Safety model
@@ -45,14 +46,14 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - Treat anonymization as an explicit, local file operation. Do not assume retrieved data is anonymous until `scripts/dicom_anonymize.py` has been run and the result has been checked.
 - The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
 - Treat dicomized PDFs as sensitive because the PDF bytes are embedded as-is.
-- Treat PNG previews as sensitive because burned-in pixel annotations can remain visible.
+- Treat PNG previews and MP4 videos as sensitive because burned-in pixel annotations can remain visible.
 
 ## Repository layout
 
 ```text
 .
 ├── README.md                # GitHub/project overview
-├── LICENSE.txt              # Repository license
+├── LICENSE.txt              # Apache License 2.0
 ├── screenshot1.png          # README media
 ├── screenshot2.png          # README media
 ├── screenshot3.png          # README media
@@ -64,6 +65,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
         ├── requirements.txt         # Python runtime dependencies
         ├── examples/
         │   ├── anonymize-local.md
+        │   ├── series-video-local.md
         │   ├── dicom_nodes.yaml
         │   ├── orthanc-local.md
         │   └── pdf-dicomize-local.md
@@ -75,6 +77,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
             ├── dicom_jpeg2000.py
             ├── dicom_pdf.py
             ├── dicom_preview.py
+            ├── dicom_volume_video.py
             ├── orthanc_temp.py
             └── validate_install.py
 ```
@@ -90,6 +93,8 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - `pylibjpeg`
 - `pylibjpeg-openjpeg`
 - `Pillow`
+- `imageio`
+- `imageio-ffmpeg`
 - Docker, only when using the temporary Orthanc helper
 
 Install from the skill package folder:
@@ -102,9 +107,10 @@ pip install -r requirements.txt
 python scripts/validate_install.py
 ```
 
-The DIMSE, anonymization, PDF dicomizer, JPEG 2000, and PNG preview commands
+The DIMSE, anonymization, PDF dicomizer, JPEG 2000, PNG preview, and MP4 export commands
 only require Python dependencies. JPEG 2000 encoding uses
-`pylibjpeg-openjpeg`; preview rendering uses `Pillow`. Docker is only needed
+`pylibjpeg-openjpeg`; preview rendering uses `Pillow`; MP4 export uses
+`imageio-ffmpeg`. Docker is only needed
 for the helper that launches a temporary Orthanc receiver.
 
 All command examples below assume the current working directory is
@@ -318,7 +324,68 @@ specific 1-based frame or `--all-frames` to render every frame. Use
 `--max-size 1024` for compact review PNGs, or override grayscale display with
 `--window-center` and `--window-width`.
 
-### 8. Anonymize local DICOM files
+### 8. Export DICOM image series to MP4
+
+Video export is a local file operation; it does not connect to a PACS. By
+default, the command applies modality-specific automatic policies:
+
+- CT: export series with more than 100 images at 10 frames/sec.
+- MR: export series with 15-100 images at 3 frames/sec.
+- MR: export series with more than 100 images at 10 frames/sec.
+- Other modalities: list the study series and ask the user which series and
+  frame rate to export.
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path downloads/study \
+  --out videos/study \
+  --summary \
+  --out-json audit/video_export.json
+```
+
+List the series first when a folder may contain multiple exams, when the user
+wants to choose specific series, or when the modality has no automatic export
+policy:
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path downloads/study \
+  --out videos/study \
+  --list-series \
+  --include-descriptions \
+  --summary \
+  --out-json audit/series_list.json
+```
+
+Explicit series selections bypass the automatic selection thresholds. Planes can
+be repeated or comma-separated, and `--frame-rate` overrides the modality
+default. For modalities other than CT or MR, provide `--frame-rate` after the
+user chooses one or more series:
+
+```bash
+python scripts/dicom_volume_video.py \
+  --path downloads/study \
+  --out videos/study \
+  --series-number 3 \
+  --plane axial --plane sagittal --plane coronal \
+  --frame-rate 15 \
+  --summary \
+  --out-json audit/video_series3.json
+```
+
+The exporter applies grayscale rescale/windowing when available, uses manual
+windowing when provided, and falls back to percentile/min-max normalization.
+MP4 videos can contain burned-in pixel PHI and should be treated as sensitive.
+
+Selection and output behavior:
+
+- Without a series selector, only CT/MR series matching the automatic policy are exported.
+- With `--series-uid`, `--series-number`, or `--series-description-contains`, matching series are exported even when they do not match automatic thresholds.
+- For selected non-CT/non-MR series, `--frame-rate` is required.
+- Without `--plane`, only the axial MP4 is written. Use `--plane sagittal` or `--plane coronal` for reformatted videos.
+- Output is organized by study and series UID under the requested `--out` directory.
+
+### 9. Anonymize local DICOM files
 
 Use `scripts/dicom_anonymize.py` only on local files or folders. It does not
 contact remote DICOM nodes. The default workflow uses the bundled
@@ -341,7 +408,7 @@ runs; the mapping file can contain PHI because original identifiers may be used
 as keys. The anonymizer marks datasets with `PatientIdentityRemoved=YES`, but it
 does not remove burned-in pixel annotations or run OCR.
 
-### 9. Wrap PDFs as DICOM Encapsulated PDF
+### 10. Wrap PDFs as DICOM Encapsulated PDF
 
 Use `scripts/dicom_pdf.py` only on local PDF files. It writes DICOM
 Encapsulated PDF Storage instances without changing the PDF contents.
@@ -372,7 +439,7 @@ The output uses `SOPClassUID=EncapsulatedPDFStorage`,
 `MIMETypeOfEncapsulatedDocument=application/pdf`, and `BurnedInAnnotation=YES`
 by default because the embedded PDF may contain visible PHI.
 
-### 10. Send files with C-STORE
+### 11. Send files with C-STORE
 
 Discover readable DICOM files before sending:
 
@@ -427,17 +494,18 @@ destination.
 
 ## Output and audit files
 
-All DIMSE, anonymization, PDF dicomizer, JPEG 2000, and PNG preview commands print JSON. Use:
+All DIMSE, anonymization, PDF dicomizer, JPEG 2000, PNG preview, and MP4 export commands print JSON. Use:
 
 - `--summary` for concise, PHI-light terminal output.
 - `--out-json path/to/result.json` to persist the full result for audit/debugging.
 - Explicit output directories such as `downloads/`, `anonymized/`, `previews/`,
-  or `audit/` for payloads and command results.
+  `videos/`, or `audit/` for payloads and command results.
 - Avoid `--include-files` in chat output unless needed; source paths can contain PHI.
 
-After successful verification, remove temporary ZIP, DICOM payload, or PNG
-preview folders that were created only for the operation. Keep JSON summaries,
-command logs, and UID lists unless the user asks to remove them.
+After successful verification, remove temporary ZIP, DICOM payload, PNG preview,
+or disposable video-test folders that were created only for the operation. Keep
+JSON summaries, command logs, UID lists, and requested MP4 exports unless the
+user asks to remove them.
 
 Do not delete anonymized exports or mapping JSON files unless the user
 explicitly asks. Mapping JSON files can contain PHI.
@@ -482,6 +550,21 @@ Run `python scripts/validate_install.py` and check the pixel decoder details.
 JPEG 2000 and other compressed transfer syntaxes require an available pydicom
 pixel decoder.
 
+**MP4 export fails**
+
+Run `python scripts/validate_install.py` and check the `codecs.video_mp4` block.
+MP4 export requires `imageio-ffmpeg`, and compressed input also needs a
+pydicom pixel decoder for the source transfer syntax.
+
+**No MP4 videos are selected**
+
+The automatic selector exports CT series with more than 100 images, MR series
+with 15-100 images at 3 frames/sec, and MR series with more than 100 images at
+10 frames/sec. Run `scripts/dicom_volume_video.py --list-series --include-descriptions`
+and then use `--series-uid`, `--series-number`, or
+`--series-description-contains` plus `--frame-rate` when the user wants one or
+more specific non-CT/non-MR series.
+
 **PDF dicomizer output still contains visible patient data**
 
 The PDF is embedded as-is in `EncapsulatedDocument`. Redact/de-identify PDF
@@ -514,6 +597,7 @@ python scripts/dicom_anonymize.py --help
 python scripts/dicom_jpeg2000.py --help
 python scripts/dicom_pdf.py --help
 python scripts/dicom_preview.py --help
+python scripts/dicom_volume_video.py --help
 python scripts/orthanc_temp.py --help
 ```
 
@@ -523,6 +607,8 @@ and
 [`skill/dicom-skill/examples/anonymize-local.md`](skill/dicom-skill/examples/anonymize-local.md).
 For PDF wrapping, see
 [`skill/dicom-skill/examples/pdf-dicomize-local.md`](skill/dicom-skill/examples/pdf-dicomize-local.md).
+For MP4 export, see
+[`skill/dicom-skill/examples/series-video-local.md`](skill/dicom-skill/examples/series-video-local.md).
 
 ## RSNA anonymizer note
 
