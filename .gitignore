@@ -3,3 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+
+# Private, machine-specific configuration and notes (real endpoints / PHI).
+# Keep these out of the public repository.
+*.local.yaml
+*.local.yml
+*.local.md

@@ -1,5 +1,10 @@
 calling_aet: AGENT
 current_node: orthanc
+# Optional: ordered source nodes to try when an exam is named but not a node.
+# Query each in order and stop at the first match.
+source_fallback:
+  - orthanc
+  - pacs
 nodes:
   orthanc:
     host: localhost

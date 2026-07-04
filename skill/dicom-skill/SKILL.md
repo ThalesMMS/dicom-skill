@@ -34,14 +34,26 @@ Use either explicit command-line parameters or a YAML config. Minimal config:
 
 ```yaml
 calling_aet: AGENT
+current_node: orthanc
+# Optional: ordered source nodes to try when the user names an exam but not a
+# node. Query each in order and stop at the first match.
+source_fallback:
+  - orthanc
+  - pacs
 nodes:
   orthanc:
     host: localhost
     port: 4242
     ae_title: ORTHANC
+  pacs:
+    host: pacs.example.local
+    port: 104
+    ae_title: PACS
 ```
 
 Save as `dicom_nodes.yaml`, then use `--config dicom_nodes.yaml --node orthanc`.
+
+Keep real, machine-specific endpoints out of the repository: copy `examples/dicom_nodes.local.yaml.example` to `examples/dicom_nodes.local.yaml` (already gitignored), fill in your nodes, and pass `--config examples/dicom_nodes.local.yaml`. When the user asks for an exam and does not name a node, query the nodes in `source_fallback` order and stop at the first match.
 
 ## Core commands
 
@@ -69,6 +81,8 @@ python scripts/dicom_dimse.py query \
 ```
 
 Common levels: `PATIENT`, `STUDY`, `SERIES`, `IMAGE` (`INSTANCE` is accepted as an alias for `IMAGE`). Use DICOM keywords such as `PatientID`, `AccessionNumber`, `StudyInstanceUID`, or hex tags such as `00100020`.
+
+When the user asks for a patient's exam without giving a date, default to a study-level query filtered by today's date (`StudyDate=YYYYMMDD`) plus a patient-name wildcard, and widen the date range only if there is no match. Many source nodes support only `patient` and `study` query models, not `series`. Do not force a series-level C-FIND: retrieve the study locally and inspect its series with the tools below instead.
 
 ### Retrieve with C-GET
 
@@ -173,7 +187,11 @@ For multiframe instances, the default is the first frame. Use `--frame 5` for a 
 
 ### DICOM image series to MP4
 
-Use `scripts/dicom_volume_video.py` to export local DICOM image series from a study folder to MP4. By default it applies modality-specific automatic policies:
+Use `scripts/dicom_volume_video.py` to export local DICOM image series from a study folder to MP4. When a study contains multiple series, run `--list-series --include-descriptions` first and export the exact series by `--series-number`/`--series-uid` rather than trusting the auto-selected default; the listing shows which series was selected and why, which is the safest way to avoid exporting the wrong one in mixed studies.
+
+When delivering an exported video to the user over Telegram/chat, send it as a native attachment using a bare `MEDIA:` line with the absolute file path (for example `MEDIA:/tmp/videos/study_axial.mp4`). Do not prepend emoji, labels, quotes, or other text on that line, or the client may render it as plain text instead of a media attachment.
+
+By default it applies modality-specific automatic policies:
 
 - CT: export series with more than 100 images at 10 frames/sec.
 - MR: export series with 15-100 images at 3 frames/sec.
@@ -209,7 +227,7 @@ python scripts/dicom_volume_video.py \
   --summary --out-json /mnt/data/audit/video_series3.json
 ```
 
-The script applies grayscale Modality LUT/rescale, uses manual `--window-center/--window-width` when supplied, otherwise uses DICOM window values when present, and falls back to percentile/min-max normalization. Use `--percentile-window 0.5,99.5`, `--max-size`, `--reverse`, or `--overwrite` when needed. MP4 exports can contain burned-in annotations and must be treated as sensitive.
+The script applies grayscale Modality LUT/rescale, uses manual `--window-center/--window-width` when supplied, otherwise uses DICOM window values when present, and falls back to percentile/min-max normalization. Use `--percentile-window 0.5,99.5`, `--max-size`, `--reverse`, or `--overwrite` when needed. MP4 exports can contain burned-in annotations and must be treated as sensitive. See `references/mp4-export-workflow.md` for a concise export pattern and selection notes, and `references/dicom-source-fallback.md` for querying multiple source nodes in order.
 
 Selection rules:
 
@@ -304,7 +322,7 @@ The REST API requires authentication by default: `start` generates a random pass
 7. For local JPEG 2000 compression/decompression, keep source and output folders separate, run a dry-run on large folders, and persist the JSON result with `--out-json`.
 8. For PDF dicomization, keep PDF sources and generated DICOM output separate, prefer `--metadata-from` when attaching to an existing study, and do not claim PDF contents were anonymized.
 9. For PNG preview rendering, keep previews in an explicit output folder, use `--max-size` when a compact visual check is enough, and remember burned-in pixel annotations can remain visible.
-10. For MP4 export, run `--list-series` when the user has not provided a specific series and the folder may contain multiple studies or non-CT/non-MR modalities. Default CT to series with more than 100 images at 10 frames/sec. Default MR to 15-100 images at 3 frames/sec and more than 100 images at 10 frames/sec. For other modalities, ask which series and frame rate to export before running the export command.
+10. For MP4 export, first retrieve the study locally, then run `--list-series` when the user has not provided a specific series and the folder may contain multiple studies or non-CT/non-MR modalities. If the source only supports study/patient query models, do not force a series-level C-FIND — inspect the retrieved study locally instead. Default CT to series with more than 100 images at 10 frames/sec. Default MR to 15-100 images at 3 frames/sec and more than 100 images at 10 frames/sec. For other modalities, ask which series and frame rate to export before running the export command.
 11. For send, verify the destination with C-ECHO, run a dry-run on the file set, then send. If the user requests anonymized transfer, send only from the anonymized output directory.
 12. Save full command output JSON with `--out-json` for auditability and use `--summary` for terminal/chat output on large studies.
 13. After successful verification, clear temporary ZIP/DICOM/PDF/PNG payload files created in the workspace while preserving audit JSON/logs and requested MP4 exports by default.

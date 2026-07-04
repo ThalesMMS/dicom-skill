@@ -1,0 +1,31 @@
+# Template for a private node configuration.
+#
+# Copy this file to `dicom_nodes.local.yaml` (same folder) and fill in your real
+# endpoints. `dicom_nodes.local.yaml` is gitignored, so real hosts/ports/AE
+# titles stay out of the repository; this `.example` template is safe to commit.
+#
+#   cp examples/dicom_nodes.local.yaml.example examples/dicom_nodes.local.yaml
+#   python scripts/dicom_dimse.py echo --config examples/dicom_nodes.local.yaml --node primary
+
+calling_aet: AGENT
+
+# Node used when --node is omitted.
+current_node: primary
+
+# Ordered source nodes to try when the user names an exam (e.g. by patient name)
+# but not a node. Query each in order and stop at the first match.
+source_fallback:
+  - primary
+  - secondary
+
+nodes:
+  primary:
+    host: 127.0.0.1          # replace with your primary node host/IP
+    port: 104                # replace with your primary node DICOM port
+    ae_title: PRIMARY_AET    # replace with the called AE title
+    description: Primary local DICOM node
+  secondary:
+    host: 10.0.0.2           # replace with your fallback node host/IP
+    port: 4006               # replace with your fallback node DICOM port
+    ae_title: SECONDARY_AET  # replace with the called AE title
+    description: Secondary DICOM node (fallback)

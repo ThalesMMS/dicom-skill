@@ -2,8 +2,11 @@ SKILL.md
 examples/anonymize-local.md
 examples/series-video-local.md
 examples/dicom_nodes.yaml
+examples/dicom_nodes.local.yaml.example
 examples/orthanc-local.md
 examples/pdf-dicomize-local.md
+references/mp4-export-workflow.md
+references/dicom-source-fallback.md
 manifest.txt
 requirements.txt
 resources/rsna/default-anonymizer.script

@@ -67,8 +67,12 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
         │   ├── anonymize-local.md
         │   ├── series-video-local.md
         │   ├── dicom_nodes.yaml
+        │   ├── dicom_nodes.local.yaml.example   # Template for private nodes (gitignored copy)
         │   ├── orthanc-local.md
         │   └── pdf-dicomize-local.md
+        ├── references/
+        │   ├── mp4-export-workflow.md   # Series-to-MP4 selection/export pattern
+        │   └── dicom-source-fallback.md # Querying multiple source nodes in order
         ├── resources/
         │   └── rsna/                # Bundled RSNA anonymizer script and license
         ├── scripts/
@@ -135,11 +139,19 @@ For repeated use, define nodes in YAML:
 ```yaml
 calling_aet: AGENT
 current_node: orthanc
+# Optional: ordered source nodes to try when an exam is named but not a node.
+source_fallback:
+  - orthanc
+  - pacs
 nodes:
   orthanc:
     host: 127.0.0.1
     port: 4242
     ae_title: ORTHANC
+  pacs:
+    host: pacs.example.local
+    port: 104
+    ae_title: PACS
 ```
 
 Then reference the node:
@@ -147,6 +159,22 @@ Then reference the node:
 ```bash
 python scripts/dicom_dimse.py echo --config examples/dicom_nodes.yaml --node orthanc
 ```
+
+### Private, machine-specific nodes
+
+Keep real endpoints out of the repository. Copy the template to a gitignored
+local file, fill in your nodes, and point `--config` at it:
+
+```bash
+cp examples/dicom_nodes.local.yaml.example examples/dicom_nodes.local.yaml
+# edit examples/dicom_nodes.local.yaml with your real hosts/ports/AE titles
+python scripts/dicom_dimse.py echo --config examples/dicom_nodes.local.yaml --node primary
+```
+
+`*.local.yaml` and `*.local.md` are gitignored, so real hosts, ports, and AE
+titles never get committed. When a study is requested without a named node,
+query the nodes listed under `source_fallback` in order and stop at the first
+match — see [`references/dicom-source-fallback.md`](skill/dicom-skill/references/dicom-source-fallback.md).
 
 ## Common workflows
 
