@@ -71,15 +71,17 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
         │   └── pdf-dicomize-local.md
         ├── resources/
         │   └── rsna/                # Bundled RSNA anonymizer script and license
-        └── scripts/
-            ├── dicom_dimse.py
-            ├── dicom_anonymize.py
-            ├── dicom_jpeg2000.py
-            ├── dicom_pdf.py
-            ├── dicom_preview.py
-            ├── dicom_volume_video.py
-            ├── orthanc_temp.py
-            └── validate_install.py
+        ├── scripts/
+        │   ├── _common.py           # Shared helpers (discovery, JSON, atomic writes)
+        │   ├── dicom_dimse.py
+        │   ├── dicom_anonymize.py
+        │   ├── dicom_jpeg2000.py
+        │   ├── dicom_pdf.py
+        │   ├── dicom_preview.py
+        │   ├── dicom_volume_video.py
+        │   ├── orthanc_temp.py
+        │   └── validate_install.py
+        └── tests/                   # pytest suite using synthetic DICOM only
 ```
 
 ## Requirements
@@ -161,6 +163,11 @@ python scripts/dicom_dimse.py echo \
 
 Run this first. If C-ECHO fails, fix AE titles, host, port, firewall rules, TLS
 expectations, or remote AE authorization before attempting query or transfer.
+
+For nodes that require DICOM over TLS, every DIMSE command accepts `--tls`
+(system CA verification), `--tls-ca ca.pem` (private CA), `--tls-cert
+client.pem --tls-key client.key` (mutual TLS), and `--tls-no-verify` (testing
+only). Without these flags, associations use plain TCP.
 
 ### 2. Query studies with C-FIND
 
@@ -403,10 +410,13 @@ python scripts/dicom_anonymize.py \
 ```
 
 Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization.
-Use `--map-json secure/anon_map.json` only when mappings must persist across
-runs; the mapping file can contain PHI because original identifiers may be used
-as keys. The anonymizer marks datasets with `PatientIdentityRemoved=YES`, but it
-does not remove burned-in pixel annotations or run OCR.
+The salt also drives the per-patient date shift, so reuse the same salt when
+UIDs and shifted dates must stay consistent across runs. Use
+`--map-json secure/anon_map.json` only when mappings must persist across
+runs; the mapping file is written with owner-only permissions (0600) because
+original identifiers may be used as keys. The anonymizer marks datasets with
+`PatientIdentityRemoved=YES`, but it does not remove burned-in pixel
+annotations or run OCR.
 
 ### 10. Wrap PDFs as DICOM Encapsulated PDF
 
@@ -474,7 +484,7 @@ The helper starts an ephemeral Orthanc container with:
 
 - AE title: `AGENT`
 - Host DICOM port: `4242`
-- REST API: `http://127.0.0.1:8042`
+- REST API: `http://127.0.0.1:8042`, protected by a per-run generated password
 - Remote access enabled inside the container
 - Called AE and modality host checks disabled for the temporary receiver
 
@@ -491,6 +501,17 @@ python scripts/orthanc_temp.py stop --purge
 The REST API binds to localhost by default. The DICOM port is exposed on the host
 because remote DICOM nodes must be able to open an association back to the move
 destination.
+
+`start` generates a random REST password for user `agent` and saves it with
+owner-only permissions in the helper's data dir. The data dir defaults to a
+deterministic per-container-name location, so `status`, `export`, and
+`stop --purge` invoked with the same `--name` (or the default name) find the
+credentials and storage automatically — no password needs to be passed around.
+For custom setups, credentials can be supplied via `--data-dir`,
+`--http-user`/`--http-password`, or the `DICOM_SKILL_ORTHANC_PASSWORD`
+environment variable. Pass `--no-http-auth` to `start` only when an
+unauthenticated localhost REST API is acceptable. The
+`retrieve --use-temp-orthanc` flow wires the credentials automatically.
 
 ## Output and audit files
 
@@ -586,6 +607,13 @@ Validate the local install:
 
 ```bash
 python scripts/validate_install.py
+```
+
+Run the test suite (synthetic DICOM only; no network or Docker required):
+
+```bash
+pip install pytest
+python -m pytest tests/
 ```
 
 Inspect command help:

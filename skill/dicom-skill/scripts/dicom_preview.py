@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,31 +19,21 @@ try:
     from pydicom import dcmread
     from pydicom.dataset import Dataset
     from pydicom.pixels import apply_color_lut, apply_modality_lut, apply_voi_lut
-    from pydicom.uid import UID
 except Exception as exc:  # pragma: no cover
     print(json.dumps({"error": f"PNG preview dependencies are required: {exc}"}), file=sys.stderr)
     raise
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-@dataclass(frozen=True)
-class InputFile:
-    source: Path
-    relative_output: Path
-
-
-def value_to_plain(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def uid_to_plain(value: Any) -> dict[str, Any] | None:
-    if value in (None, ""):
-        return None
-    uid = UID(str(value))
-    return {"uid": str(uid), "name": uid.name, "is_compressed": bool(uid.is_compressed)}
+from _common import (
+    InputFile,
+    discover_dicom_files,
+    print_or_write as _print_or_write,
+    uid_to_plain,
+    value_to_plain,
+)
 
 
 def parse_percentiles(value: str | None) -> tuple[float, float] | None:
@@ -57,34 +46,6 @@ def parse_percentiles(value: str | None) -> tuple[float, float] | None:
     if not 0 <= low < high <= 100:
         raise ValueError("--percentile-window values must satisfy 0 <= LOW < HIGH <= 100.")
     return low, high
-
-
-def discover_dicom_files(paths: list[str], *, force: bool = False, max_files: int | None = None) -> list[InputFile]:
-    discovered: list[InputFile] = []
-    for item in paths:
-        path = Path(item).expanduser().resolve()
-        if path.is_file():
-            candidates = [(path, Path(path.name))]
-        elif path.is_dir():
-            root_name = path.name or "input"
-            candidates = [
-                (candidate, Path(root_name) / candidate.relative_to(path))
-                for candidate in path.rglob("*")
-                if candidate.is_file()
-            ]
-        else:
-            raise FileNotFoundError(f"Path not found: {item}")
-
-        for candidate, relative_output in candidates:
-            try:
-                ds = dcmread(str(candidate), stop_before_pixels=True, force=force)
-                if getattr(ds, "SOPClassUID", None):
-                    discovered.append(InputFile(candidate, relative_output))
-            except Exception:
-                continue
-            if max_files is not None and len(discovered) >= max_files:
-                return discovered
-    return discovered
 
 
 def relative_png_path(relative_output: Path, frame_number: int | None = None) -> Path:
@@ -329,12 +290,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False)
-    if out_json:
-        Path(out_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_json).write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False))
+    _print_or_write(result, out_json, command_summary if summary else None)
 
 
 def run_command(args: argparse.Namespace) -> dict[str, Any]:

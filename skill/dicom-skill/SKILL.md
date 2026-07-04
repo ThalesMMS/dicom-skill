@@ -52,6 +52,8 @@ python scripts/dicom_dimse.py echo \
   --host 127.0.0.1 --port 4242 --aet ORTHANC --calling-aet AGENT
 ```
 
+All DIMSE commands accept TLS flags when the remote node requires DICOM over TLS: `--tls` enables TLS with system CA verification, `--tls-ca ca.pem` supplies a private CA bundle, `--tls-cert client.pem --tls-key client.key` add a client certificate for mutual TLS, and `--tls-no-verify` disables verification for testing only. Without these flags the association uses plain TCP.
+
 ### C-FIND query
 
 Study-level query by date and modality:
@@ -245,7 +247,7 @@ python scripts/dicom_anonymize.py \
   --out-json /mnt/data/audit/anonymize.json
 ```
 
-Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization. Use `--map-json /secure/path/anon_map.json` only when the user needs mappings to persist across runs; the mapping file can contain PHI and must be stored securely. Use `--include-files` only when needed because source paths can contain PHI.
+Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization. The salt also determines the per-patient date shift, so keep the same salt for a project when consistent UIDs and dates across runs matter. Use `--map-json /secure/path/anon_map.json` only when the user needs mappings to persist across runs; the mapping file is written with owner-only permissions because it can contain PHI. Use `--include-files` only when needed because source paths can contain PHI.
 
 Before sending anonymized output to another DICOM node, run a dry-run C-STORE against the anonymized output folder and keep the anonymization JSON audit artifact.
 
@@ -288,6 +290,8 @@ python scripts/orthanc_temp.py stop --purge
 ```
 
 The helper exposes Orthanc REST only on `127.0.0.1:8042` by default, while DICOM listens on host port `4242`. It configures the temporary Orthanc to accept incoming C-STORE and C-ECHO without modality host checks.
+
+The REST API requires authentication by default: `start` generates a random password for user `agent` and saves it (owner-readable only) in the helper's data dir, which defaults to a deterministic per-container-name location. Later `status`/`export`/`stop` calls with the same `--name` (or default name) find the credentials and data dir automatically, so no password handling is needed in the normal flow. Override with `--data-dir`, `--http-user`/`--http-password`, or `$DICOM_SKILL_ORTHANC_PASSWORD` only for custom setups. Use `start --no-http-auth` only when an unauthenticated localhost REST API is acceptable. The retrieve `--use-temp-orthanc` flow handles credentials automatically.
 
 ## Agent workflow
 

@@ -9,6 +9,7 @@ requirements.txt
 resources/rsna/default-anonymizer.script
 resources/rsna/LICENSE-RSNA-anonymizer.txt
 resources/rsna/README.md
+scripts/_common.py
 scripts/dicom_anonymize.py
 scripts/dicom_dimse.py
 scripts/dicom_jpeg2000.py

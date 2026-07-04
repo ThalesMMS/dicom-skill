@@ -42,6 +42,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 DEFAULT_RSNA_SCRIPT = SKILL_DIR / "resources" / "rsna" / "default-anonymizer.script"
 
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from _common import (
+    discover_dicom_files,
+    print_or_write as _print_or_write,
+    safe_path_component as sanitize_component,
+    save_dataset_atomic,
+    write_private_text,
+)
+
 DEFAULT_SITE_ID = "999999"
 DEFAULT_PROJECT_NAME = "dicom-skill"
 DEFAULT_UID_ROOT = "2.25"
@@ -71,60 +82,13 @@ UID_KEYWORDS = {
 REQUIRED_ATTRIBUTES = ["SOPClassUID", "SOPInstanceUID", "StudyInstanceUID", "SeriesInstanceUID"]
 
 
-def json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, UID):
-        return str(value)
-    if isinstance(value, BaseTag):
-        return f"{int(value):08X}"
-    if isinstance(value, bytes):
-        return f"<{len(value)} bytes>"
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
 def tag_to_hex(tag: BaseTag | int | str) -> str:
     t = Tag(tag)
     return f"{int(t):08X}"
 
 
-def sanitize_component(value: Any, fallback: str) -> str:
-    text = "" if value is None else str(value).strip()
-    if not text:
-        text = fallback
-    keep = []
-    for ch in text:
-        if ch.isalnum() or ch in ".-_^":
-            keep.append(ch)
-        else:
-            keep.append("_")
-    return ("".join(keep) or fallback)[:180]
-
-
 def readable_dicom_files(paths: list[str], *, force: bool = False, max_files: int | None = None) -> list[Path]:
-    files: list[Path] = []
-    for item in paths:
-        path = Path(item).expanduser().resolve()
-        if path.is_file():
-            candidates = [path]
-        elif path.is_dir():
-            candidates = sorted([p for p in path.rglob("*") if p.is_file()])
-        else:
-            raise FileNotFoundError(f"Path not found: {item}")
-        for candidate in candidates:
-            try:
-                ds = dcmread(str(candidate), stop_before_pixels=True, force=force)
-                if getattr(ds, "SOPClassUID", None):
-                    files.append(candidate)
-            except Exception:
-                continue
-            if max_files is not None and len(files) >= max_files:
-                return files
-    return files
+    return [item.source for item in discover_dicom_files(paths, force=force, max_files=max_files)]
 
 
 @dataclass
@@ -207,8 +171,9 @@ class MappingState:
         }
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_json(), indent=2, ensure_ascii=False), encoding="utf-8")
+        # The mapping keys are original PHI values; restrict the file to the
+        # current user (mode 0600).
+        write_private_text(path, json.dumps(self.to_json(), indent=2, ensure_ascii=False))
 
 
 def numeric_site_component(site_id: str) -> str:
@@ -246,18 +211,24 @@ def valid_date_yyyymmdd(value: str) -> bool:
         return False
 
 
-def hash_date_like_rsna(value: Any, patient_id: str) -> Any:
+def hash_date_like_rsna(value: Any, patient_id: str, salt: str = "") -> Any:
+    """Shift dates by a per-patient offset derived from PatientID and the project salt.
+
+    The salt keeps the offset non-computable for anyone who knows the original
+    PatientID but not the salt. All dates of one patient shift by the same
+    number of days, preserving intervals.
+    """
     if value is None:
         return value
     if isinstance(value, (MultiValue, list, tuple)):
-        return [hash_date_like_rsna(v, patient_id) for v in value]
+        return [hash_date_like_rsna(v, patient_id, salt) for v in value]
     text = str(value)
     date_part = text[:8]
     suffix = text[8:]
     if not valid_date_yyyymmdd(date_part) or not patient_id:
         shifted = DEFAULT_DATE
     else:
-        md5_hash = hashlib.md5(patient_id.encode("utf-8")).hexdigest()
+        md5_hash = hashlib.md5((salt + "|date|" + patient_id).encode("utf-8")).hexdigest()
         days = int(md5_hash, 16) % 3652
         shifted = (datetime.strptime(date_part, "%Y%m%d") + timedelta(days=days)).strftime("%Y%m%d")
     return shifted + suffix
@@ -405,7 +376,7 @@ class Anonymizer:
             dataset[element.tag].value = "" if str(element.value or "") == "" else (anon_accession or "")
             return
         if "@hashdate" in operation:
-            dataset[element.tag].value = hash_date_like_rsna(element.value, phi_patient_id)
+            dataset[element.tag].value = hash_date_like_rsna(element.value, phi_patient_id, self.salt)
             return
         if "@round" in operation:
             match = re.search(r"\d+", operation)
@@ -426,7 +397,8 @@ class Anonymizer:
             if tag in ds:
                 del ds[tag]
 
-    def add_deidentification_tags(self, ds: Dataset) -> None:
+    def add_deidentification_tags(self, ds: Dataset) -> list[str]:
+        warnings: list[str] = []
         ds.PatientIdentityRemoved = "YES"
         ds.DeidentificationMethod = DEFAULT_DEIDENTIFICATION_METHOD
         sequence = Sequence()
@@ -441,9 +413,11 @@ class Anonymizer:
             block = ds.private_block(0x0013, "RSNA", create=True)
             block.add_new(0x01, "SH", str(self.site_id)[:16])
             block.add_new(0x03, "SH", str(self.project_name)[:16])
-        except Exception:
-            # Private provenance tags are useful but not essential.
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Private provenance tags are useful but not essential; surface the
+            # failure in the audit output instead of swallowing it.
+            warnings.append(f"Could not add private provenance tags: {exc}")
+        return warnings
 
     def sync_file_meta(self, ds: Dataset) -> None:
         if not getattr(ds, "file_meta", None):
@@ -488,7 +462,7 @@ class Anonymizer:
             )
 
         ds.walk(callback)
-        self.add_deidentification_tags(ds)
+        warnings = self.add_deidentification_tags(ds)
         self.sync_file_meta(ds)
 
         after = {
@@ -498,7 +472,10 @@ class Anonymizer:
             "SOPInstanceUID": str(getattr(ds, "SOPInstanceUID", "") or ""),
             "StudyDate": str(getattr(ds, "StudyDate", "") or ""),
         }
-        return ds, {"original": original, "anonymized": after}
+        info: dict[str, Any] = {"original": original, "anonymized": after}
+        if warnings:
+            info["warnings"] = warnings
+        return ds, info
 
 
 def output_path_for_dataset(out_dir: Path, ds: Dataset, fallback_index: int) -> Path:
@@ -512,11 +489,7 @@ def output_path_for_dataset(out_dir: Path, ds: Dataset, fallback_index: int) -> 
 
 
 def write_dataset(ds: Dataset, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        ds.save_as(str(path), enforce_file_format=True)
-    except TypeError:
-        ds.save_as(str(path), write_like_original=False)
+    save_dataset_atomic(ds, path)
 
 
 def command_anonymize(args: argparse.Namespace) -> dict[str, Any]:
@@ -646,13 +619,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False, default=json_default)
-    if out_json:
-        path = Path(out_json).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False, default=json_default))
+    _print_or_write(result, out_json, command_summary if summary else None)
 
 
 def build_parser() -> argparse.ArgumentParser:

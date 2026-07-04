@@ -8,14 +8,14 @@ This script is intentionally a CLI utility for agents; it does not expose MCP.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
-import os
+import ssl
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterator
 
 try:
     import yaml
@@ -25,9 +25,8 @@ except Exception:  # pragma: no cover - handled at runtime
 try:
     import pydicom
     from pydicom import dcmread
-    from pydicom.datadict import dictionary_VR, keyword_for_tag, tag_for_keyword
+    from pydicom.datadict import dictionary_VR, tag_for_keyword
     from pydicom.dataset import Dataset
-    from pydicom.multival import MultiValue
     from pydicom.tag import Tag
     from pydicom.uid import UID
 except Exception as exc:  # pragma: no cover
@@ -53,6 +52,14 @@ except Exception as exc:  # pragma: no cover
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+
+from _common import (
+    dataset_to_plain,
+    discover_dicom_files as _discover_input_files,
+    print_or_write,
+    safe_path_component,
+    value_to_plain,
+)
 
 try:
     from orthanc_temp import export_instances, start_temp_orthanc, stop_temp_orthanc
@@ -258,37 +265,6 @@ def build_retrieve_dataset(args: argparse.Namespace) -> Dataset:
     return ds
 
 
-def value_to_plain(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return f"<{len(value)} bytes>"
-    if isinstance(value, UID):
-        return str(value)
-    if isinstance(value, MultiValue):
-        return [value_to_plain(v) for v in value]
-    if isinstance(value, (list, tuple)):
-        return [value_to_plain(v) for v in value]
-    if isinstance(value, Dataset):
-        return dataset_to_plain(value)
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def dataset_to_plain(ds: Dataset | None) -> dict[str, Any] | None:
-    if ds is None:
-        return None
-    out: dict[str, Any] = {}
-    for elem in ds:
-        key = elem.keyword or f"{int(elem.tag):08X}"
-        if elem.VR == "SQ":
-            out[key] = [dataset_to_plain(item) for item in elem.value]
-        else:
-            out[key] = value_to_plain(elem.value)
-    return out
-
-
 def status_to_plain(status: Dataset | None) -> dict[str, Any]:
     if status is None:
         return {"status": None, "message": "No response status; association may have timed out or aborted."}
@@ -375,15 +351,6 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False)
-    if out_json:
-        Path(out_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_json).write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False))
-
-
 def make_ae(calling_aet: str, timeout: float | None = None) -> AE:
     ae = AE(ae_title=calling_aet)
     if timeout is not None:
@@ -393,18 +360,51 @@ def make_ae(calling_aet: str, timeout: float | None = None) -> AE:
     return ae
 
 
+def build_tls_args(args: argparse.Namespace, remote: RemoteNode) -> tuple[ssl.SSLContext, str] | None:
+    """Build pynetdicom ``tls_args`` from CLI flags, or None for plain TCP."""
+    if not (getattr(args, "tls", False) or args.tls_ca or args.tls_cert or args.tls_key):
+        return None
+    if args.tls_key and not args.tls_cert:
+        raise ValueError("--tls-key requires --tls-cert.")
+    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=args.tls_ca)
+    if args.tls_cert:
+        context.load_cert_chain(args.tls_cert, args.tls_key)
+    if args.tls_no_verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context, remote.host
+
+
+@contextlib.contextmanager
+def dicom_association(ae: AE, remote: RemoteNode, args: argparse.Namespace, result: dict[str, Any], **assoc_kwargs: Any) -> Iterator[Any]:
+    """Associate with the remote AE and guarantee release on every exit path."""
+    tls_args = build_tls_args(args, remote)
+    if tls_args is not None:
+        assoc_kwargs["tls_args"] = tls_args
+        result["tls"] = True
+    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet, **assoc_kwargs)
+    result["established"] = bool(assoc.is_established)
+    if not assoc.is_established:
+        result["error"] = "Association rejected, aborted, or never connected."
+    try:
+        yield assoc
+    finally:
+        try:
+            if assoc.is_established:
+                assoc.release()
+        except Exception:  # noqa: BLE001 - releasing a dead association must not mask the real error
+            pass
+
+
 def command_echo(args: argparse.Namespace) -> dict[str, Any]:
     remote = resolve_remote(args)
     ae = make_ae(remote.calling_aet, args.timeout)
     ae.add_requested_context(Verification)
-    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet)
-    result: dict[str, Any] = {"operation": "C-ECHO", "remote": remote.to_dict(), "established": bool(assoc.is_established)}
-    if assoc.is_established:
-        status = assoc.send_c_echo()
-        result["status"] = status_to_plain(status)
-        assoc.release()
-    else:
-        result["error"] = "Association rejected, aborted, or never connected."
+    result: dict[str, Any] = {"operation": "C-ECHO", "remote": remote.to_dict()}
+    with dicom_association(ae, remote, args, result) as assoc:
+        if assoc.is_established:
+            status = assoc.send_c_echo()
+            result["status"] = status_to_plain(status)
     return result
 
 
@@ -417,27 +417,23 @@ def command_query(args: argparse.Namespace) -> dict[str, Any]:
 
     ae = make_ae(remote.calling_aet, args.timeout)
     ae.add_requested_context(model)
-    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet)
     result: dict[str, Any] = {
         "operation": "C-FIND",
         "remote": remote.to_dict(),
         "model": model_key,
         "identifier": dataset_to_plain(identifier),
-        "established": bool(assoc.is_established),
         "matches": [],
         "responses": [],
     }
-    if assoc.is_established:
-        for status, response_identifier in assoc.send_c_find(identifier, model):
-            plain_status = status_to_plain(status)
-            result["responses"].append({"status": plain_status, "identifier": dataset_to_plain(response_identifier)})
-            status_code = getattr(status, "Status", None) if status else None
-            if status_code in (0xFF00, 0xFF01) and response_identifier is not None:
-                result["matches"].append(dataset_to_plain(response_identifier))
-        assoc.release()
-        result["match_count"] = len(result["matches"])
-    else:
-        result["error"] = "Association rejected, aborted, or never connected."
+    with dicom_association(ae, remote, args, result) as assoc:
+        if assoc.is_established:
+            for status, response_identifier in assoc.send_c_find(identifier, model):
+                plain_status = status_to_plain(status)
+                result["responses"].append({"status": plain_status, "identifier": dataset_to_plain(response_identifier)})
+                status_code = getattr(status, "Status", None) if status else None
+                if status_code in (0xFF00, 0xFF01) and response_identifier is not None:
+                    result["matches"].append(dataset_to_plain(response_identifier))
+            result["match_count"] = len(result["matches"])
     return result
 
 
@@ -448,21 +444,6 @@ def path_for_store(out_dir: Path, ds: Dataset, fallback_index: int) -> Path:
     dest_dir = out_dir / study_uid / series_uid
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir / f"{sop_uid}.dcm"
-
-
-def safe_path_component(value: Any, fallback: str) -> str:
-    if value is None:
-        return fallback
-    text = str(value).strip()
-    if not text:
-        return fallback
-    keep = []
-    for ch in text:
-        if ch.isalnum() or ch in ".-_^":
-            keep.append(ch)
-        else:
-            keep.append("_")
-    return "".join(keep)[:180] or fallback
 
 
 def configure_storage_contexts_for_get(ae: AE, sop_classes: list[str] | None = None) -> list[Any]:
@@ -527,7 +508,6 @@ def command_retrieve_get(args: argparse.Namespace, remote: RemoteNode, identifie
             return 0xC211
 
     handlers = [(evt.EVT_C_STORE, handle_store)]
-    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet, ext_neg=roles, evt_handlers=handlers)
     result: dict[str, Any] = {
         "operation": "C-GET",
         "remote": remote.to_dict(),
@@ -535,18 +515,15 @@ def command_retrieve_get(args: argparse.Namespace, remote: RemoteNode, identifie
         "identifier": dataset_to_plain(identifier),
         "out_dir": str(out_dir),
         "store_sop_classes": list(args.store_sop_class or []),
-        "established": bool(assoc.is_established),
         "responses": [],
         "received": received,
         "store_errors": store_errors,
     }
-    if assoc.is_established:
-        for status, response_identifier in assoc.send_c_get(identifier, model):
-            result["responses"].append({"status": status_to_plain(status), "identifier": dataset_to_plain(response_identifier)})
-        assoc.release()
-        result["received_count"] = len(received)
-    else:
-        result["error"] = "Association rejected, aborted, or never connected."
+    with dicom_association(ae, remote, args, result, ext_neg=roles, evt_handlers=handlers) as assoc:
+        if assoc.is_established:
+            for status, response_identifier in assoc.send_c_get(identifier, model):
+                result["responses"].append({"status": status_to_plain(status), "identifier": dataset_to_plain(response_identifier)})
+            result["received_count"] = len(received)
     return result
 
 
@@ -563,21 +540,20 @@ def command_retrieve_move(args: argparse.Namespace, remote: RemoteNode, identifi
     if use_temp:
         if start_temp_orthanc is None:
             raise RuntimeError("orthanc_temp.py could not be imported. Cannot start temporary Orthanc.")
-        temp_data_dir = args.orthanc_data_dir or tempfile.mkdtemp(prefix="dicom-skill-move-orthanc-")
         state = start_temp_orthanc(
             aet=args.destination_aet,
             dicom_port=args.orthanc_dicom_port,
             http_port=args.orthanc_http_port,
             name=args.orthanc_name,
-            data_dir=temp_data_dir,
+            data_dir=args.orthanc_data_dir,
             image=args.orthanc_image,
             pull=args.orthanc_pull,
             timeout=args.orthanc_timeout,
         )
+        temp_data_dir = state.data_dir
 
     ae = make_ae(remote.calling_aet, args.timeout)
     ae.add_requested_context(model)
-    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet)
     result: dict[str, Any] = {
         "operation": "C-MOVE",
         "remote": remote.to_dict(),
@@ -586,25 +562,27 @@ def command_retrieve_move(args: argparse.Namespace, remote: RemoteNode, identifi
         "destination_aet": args.destination_aet,
         "use_temp_orthanc": bool(use_temp),
         "out_dir": str(out_dir),
-        "established": bool(assoc.is_established),
         "responses": [],
     }
     if state is not None:
         result["temporary_orthanc"] = state.to_dict()
 
     try:
-        if assoc.is_established:
-            for status, response_identifier in assoc.send_c_move(identifier, args.destination_aet, model):
-                result["responses"].append({"status": status_to_plain(status), "identifier": dataset_to_plain(response_identifier)})
-            assoc.release()
-        else:
-            result["error"] = "Association rejected, aborted, or never connected."
+        with dicom_association(ae, remote, args, result) as assoc:
+            if assoc.is_established:
+                for status, response_identifier in assoc.send_c_move(identifier, args.destination_aet, model):
+                    result["responses"].append({"status": status_to_plain(status), "identifier": dataset_to_plain(response_identifier)})
 
         if use_temp and state is not None and export_instances is not None:
             # Orthanc generally receives during C-MOVE before final status, but leave a short grace period.
             if args.post_move_wait > 0:
                 time.sleep(args.post_move_wait)
-            result["export"] = export_instances(state.http_url, str(out_dir), clear_after=False)
+            result["export"] = export_instances(
+                state.http_url,
+                str(out_dir),
+                clear_after=False,
+                auth=state.http_auth,
+            )
     finally:
         if use_temp and state is not None and not args.keep_orthanc:
             if stop_temp_orthanc is not None:
@@ -624,25 +602,7 @@ def command_retrieve(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def discover_dicom_files(paths: list[str], force: bool = False, max_files: int | None = None) -> list[str]:
-    discovered: list[str] = []
-    for item in paths:
-        path = Path(item).expanduser().resolve()
-        if path.is_file():
-            candidates = [path]
-        elif path.is_dir():
-            candidates = [p for p in path.rglob("*") if p.is_file()]
-        else:
-            raise FileNotFoundError(f"Path not found: {item}")
-        for candidate in candidates:
-            try:
-                ds = dcmread(str(candidate), stop_before_pixels=True, force=force)
-                if getattr(ds, "SOPClassUID", None):
-                    discovered.append(str(candidate))
-            except Exception:
-                continue
-            if max_files is not None and len(discovered) >= max_files:
-                return discovered
-    return discovered
+    return [str(item.source) for item in _discover_input_files(paths, force=force, max_files=max_files)]
 
 
 def command_send(args: argparse.Namespace) -> dict[str, Any]:
@@ -679,26 +639,31 @@ def command_send(args: argparse.Namespace) -> dict[str, Any]:
         # PACS reject or negotiate poorly when offered every known syntax for a
         # storage SOP class, especially for JPEG2000 or Encapsulated PDF.
         ae.add_requested_context(sop, sorted(transfer_syntaxes))
-    assoc = ae.associate(remote.host, remote.port, ae_title=remote.aet)
-    result["established"] = bool(assoc.is_established)
-    if not assoc.is_established:
-        result["error"] = "Association rejected, aborted, or never connected."
-        return result
-
-    for f in files:
-        try:
-            ds = dcmread(f, force=args.force)
-            status = assoc.send_c_store(ds)
-            plain = status_to_plain(status)
-            code = getattr(status, "Status", None) if status else None
-            item = {"file": f, "status": plain}
-            if code == 0x0000:
-                result["sent"].append(item)
-            else:
-                result["failures"].append(item)
-        except Exception as exc:  # noqa: BLE001
-            result["failures"].append({"file": f, "error": str(exc)})
-    assoc.release()
+    with dicom_association(ae, remote, args, result) as assoc:
+        if not assoc.is_established:
+            return result
+        for index, f in enumerate(files):
+            try:
+                ds = dcmread(f, force=args.force)
+                status = assoc.send_c_store(ds)
+                plain = status_to_plain(status)
+                code = getattr(status, "Status", None) if status else None
+                item = {"file": f, "status": plain}
+                if code == 0x0000:
+                    result["sent"].append(item)
+                else:
+                    result["failures"].append(item)
+            except Exception as exc:  # noqa: BLE001
+                result["failures"].append({"file": f, "error": str(exc)})
+            if not assoc.is_established:
+                # The association died mid-batch (network drop or peer abort).
+                # Record the files that were never attempted instead of raising
+                # one confusing error per remaining file.
+                remaining = files[index + 1 :]
+                for skipped in remaining:
+                    result["failures"].append({"file": skipped, "error": "Not attempted: association lost during batch send."})
+                result["error"] = "Association lost during C-STORE batch; some files were not sent."
+                break
     result["sent_count"] = len(result["sent"])
     result["failure_count"] = len(result["failures"])
     return result
@@ -712,6 +677,11 @@ def add_remote_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--aet", help="Remote called AE title")
     parser.add_argument("--calling-aet", help="Local/calling AE title; default AGENT or config calling_aet")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Association/DIMSE/network timeout seconds")
+    parser.add_argument("--tls", action="store_true", help="Use TLS for the DICOM association")
+    parser.add_argument("--tls-ca", help="PEM CA bundle used to verify the remote node; implies --tls")
+    parser.add_argument("--tls-cert", help="PEM client certificate for mutual TLS; implies --tls")
+    parser.add_argument("--tls-key", help="PEM private key for --tls-cert")
+    parser.add_argument("--tls-no-verify", action="store_true", help="Disable TLS certificate/hostname verification (testing only)")
     parser.add_argument("--debug", action="store_true", help="Enable pynetdicom debug logging")
     parser.add_argument("--out-json", help="Write JSON result to this file as well as stdout")
     parser.add_argument("--summary", action="store_true", help="Print concise PHI-light summary to stdout; --out-json still stores full JSON")
@@ -784,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         else:  # pragma: no cover
             parser.error("Unknown command")
             return 2
-        print_or_write(result, getattr(args, "out_json", None), getattr(args, "summary", False))
+        print_or_write(result, getattr(args, "out_json", None), command_summary if getattr(args, "summary", False) else None)
         # Non-zero exit for clear failures, but keep DICOM warning statuses in JSON.
         if result.get("error"):
             return 1

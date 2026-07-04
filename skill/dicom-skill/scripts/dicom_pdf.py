@@ -23,6 +23,17 @@ except Exception as exc:  # pragma: no cover
     print(json.dumps({"error": f"pydicom is required: {exc}"}), file=sys.stderr)
     raise
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from _common import (
+    print_or_write as _print_or_write,
+    safe_path_component as safe_component,
+    save_dataset_atomic,
+    value_to_plain,
+)
+
 
 DEFAULT_MODALITY = "DOC"
 DEFAULT_MANUFACTURER = "dicom-skill"
@@ -48,27 +59,6 @@ ARG_TO_DICOM_KEY = {
 class InputPDF:
     source: Path
     relative_output: Path
-
-
-def value_to_plain(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def safe_component(value: Any, fallback: str) -> str:
-    text = "" if value is None else str(value).strip()
-    if not text:
-        text = fallback
-    keep = []
-    for ch in text:
-        if ch.isalnum() or ch in ".-_^":
-            keep.append(ch)
-        else:
-            keep.append("_")
-    return ("".join(keep) or fallback)[:180]
 
 
 def pdf_like(path: Path) -> bool:
@@ -176,8 +166,6 @@ def build_dataset(
     file_meta.ImplementationVersionName = "DICOMSKILL_PDF"
 
     ds = FileDataset("", {}, file_meta=file_meta, preamble=b"\0" * 128)
-    ds.is_little_endian = True
-    ds.is_implicit_VR = False
 
     content_date = args.content_date or now.strftime("%Y%m%d")
     content_time = args.content_time or now.strftime("%H%M%S")
@@ -219,11 +207,7 @@ def build_dataset(
 
 
 def write_dataset(ds: FileDataset, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        ds.save_as(str(dest), enforce_file_format=True)
-    except TypeError:
-        ds.save_as(str(dest), write_like_original=False)
+    save_dataset_atomic(ds, dest)
 
 
 def dicomize_one(
@@ -294,13 +278,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False)
-    if out_json:
-        path = Path(out_json).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False))
+    _print_or_write(result, out_json, command_summary if summary else None)
 
 
 def run_command(args: argparse.Namespace) -> dict[str, Any]:

@@ -8,13 +8,15 @@ connects to a DICOM node and does not remove or modify source instances.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 try:
     import imageio.v2 as imageio
@@ -27,6 +29,17 @@ try:
 except Exception as exc:  # pragma: no cover
     print(json.dumps({"error": f"DICOM series video dependencies are required: {exc}"}), file=sys.stderr)
     raise
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from _common import (
+    InputFile,
+    discover_dicom_files as _discover_input_files,
+    print_or_write as _print_or_write,
+    value_to_plain,
+)
 
 
 DEFAULT_LARGE_SERIES_MIN_IMAGES = 100
@@ -42,12 +55,6 @@ PLANE_ALIASES = {
     "sagital": "sagittal",
     "coronal": "coronal",
 }
-
-
-@dataclass(frozen=True)
-class InputFile:
-    source: Path
-    relative_output: Path
 
 
 @dataclass(frozen=True)
@@ -130,14 +137,6 @@ class VideoSeries:
         )
 
 
-def value_to_plain(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
 def first_scalar(value: Any, index: int = 0) -> Any:
     if isinstance(value, MultiValue) or isinstance(value, (list, tuple)):
         if not value:
@@ -215,31 +214,7 @@ def safe_frame_count(ds: Dataset) -> int:
 
 
 def discover_dicom_files(paths: list[str], *, force: bool = False, max_files: int | None = None) -> list[InputFile]:
-    discovered: list[InputFile] = []
-    for item in paths:
-        path = Path(item).expanduser().resolve()
-        if path.is_file():
-            candidates = [(path, Path(path.name))]
-        elif path.is_dir():
-            root_name = path.name or "input"
-            candidates = [
-                (candidate, Path(root_name) / candidate.relative_to(path))
-                for candidate in path.rglob("*")
-                if candidate.is_file()
-            ]
-        else:
-            raise FileNotFoundError(f"Path not found: {item}")
-
-        for candidate, relative_output in candidates:
-            try:
-                ds = dcmread(str(candidate), stop_before_pixels=True, force=force)
-                if getattr(ds, "SOPClassUID", None) and getattr(ds, "Modality", None):
-                    discovered.append(InputFile(candidate, relative_output))
-            except Exception:
-                continue
-            if max_files is not None and len(discovered) >= max_files:
-                return discovered
-    return discovered
+    return _discover_input_files(paths, force=force, max_files=max_files, required_attributes=("SOPClassUID", "Modality"))
 
 
 def instance_from_file(item: InputFile, *, force: bool) -> VideoInstance | None:
@@ -697,6 +672,24 @@ def writer_kwargs(args: argparse.Namespace, frame_rate: float) -> dict[str, Any]
     return params
 
 
+@contextlib.contextmanager
+def atomic_video_writer(dest: Path, args: argparse.Namespace, frame_rate: float) -> Iterator[Any]:
+    """Write the MP4 to a temp name and rename into place on success.
+
+    An interrupted or failed export never leaves a partial file at the
+    destination path.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".part.mp4")
+    try:
+        with imageio.get_writer(str(tmp), **writer_kwargs(args, frame_rate)) as writer:
+            yield writer
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
 def write_plane_video(
     volume: np.ndarray,
     series: VideoSeries,
@@ -718,10 +711,9 @@ def write_plane_video(
     )
     if dest.exists() and not args.overwrite:
         raise FileExistsError(f"Destination exists: {dest}. Use --overwrite to replace it.")
-    dest.parent.mkdir(parents=True, exist_ok=True)
 
     frame_count = 0
-    with imageio.get_writer(str(dest), **writer_kwargs(args, frame_rate)) as writer:
+    with atomic_video_writer(dest, args, frame_rate) as writer:
         for frame in iter_plane_frames(volume, plane, reverse=args.reverse):
             resized = resize_frame(frame, size)
             writer.append_data(video_frame_array(resized))
@@ -729,6 +721,105 @@ def write_plane_video(
 
     return {
         "plane": plane,
+        "path": str(dest),
+        "frame_count": frame_count,
+        "frame_rate": frame_rate,
+        "width": size[0],
+        "height": size[1],
+        "bytes": dest.stat().st_size,
+    }
+
+
+def streaming_axial_window(series: VideoSeries, args: argparse.Namespace) -> tuple[float, float, str] | None:
+    """Return (low, high, label) display bounds when they are known up front.
+
+    Streaming export writes frames as they are loaded, so it needs the window
+    bounds before seeing the whole volume. That is only possible for grayscale
+    series with a manual window or a DICOM window in the reference instance;
+    percentile/min-max normalization needs full-volume statistics.
+    """
+    if not series.instances:
+        return None
+    for instance in series.instances:
+        photometric = (instance.photometric_interpretation or "").upper()
+        if photometric not in ("MONOCHROME1", "MONOCHROME2"):
+            return None
+    if args.window_center is not None or args.window_width is not None:
+        if args.window_center is None or args.window_width is None:
+            raise ValueError("Use --window-center and --window-width together.")
+        width = float(args.window_width)
+        if width <= 0:
+            raise ValueError("--window-width must be greater than zero.")
+        center = float(args.window_center)
+        return center - width / 2.0, center + width / 2.0, "manual_window"
+    if not args.no_window and args.percentile_window is None:
+        first = series.sorted_instances()[0]
+        try:
+            reference = dcmread(str(first.source), stop_before_pixels=True, force=args.force)
+        except Exception:  # noqa: BLE001 - fall back to full-volume loading
+            return None
+        window = window_from_dataset(reference, args.voi_index)
+        if window is not None:
+            center, width = window
+            return center - width / 2.0, center + width / 2.0, "dicom_window"
+    return None
+
+
+def export_axial_streaming(
+    series: VideoSeries,
+    args: argparse.Namespace,
+    dest: Path,
+    frame_rate: float,
+    bounds: tuple[float, float, str],
+) -> dict[str, Any]:
+    """Export the axial plane one instance at a time without stacking the volume."""
+    low, high, _ = bounds
+    if dest.exists() and not args.overwrite:
+        raise FileExistsError(f"Destination exists: {dest}. Use --overwrite to replace it.")
+
+    instances = series.sorted_instances()
+    if args.reverse:
+        instances = list(reversed(instances))
+    expected_shape: tuple[int, ...] | None = None
+    size: tuple[int, int] | None = None
+    frame_count = 0
+
+    with atomic_video_writer(dest, args, frame_rate) as writer:
+        for instance in instances:
+            ds = dcmread(str(instance.source), force=args.force, defer_size="1 KB")
+            if "PixelData" not in ds:
+                raise ValueError(f"Dataset has no PixelData element: {instance.source}")
+            arr, is_color = load_pixel_array(ds, args)
+            if is_color:
+                raise ValueError("Streaming export supports grayscale series only.")
+            slices = [arr] if arr.ndim == 2 else [arr[index] for index in range(arr.shape[0])]
+            if args.reverse:
+                slices = list(reversed(slices))
+            invert = str(getattr(ds, "PhotometricInterpretation", "")).upper() == "MONOCHROME1"
+            for slice_array in slices:
+                if expected_shape is None:
+                    expected_shape = tuple(slice_array.shape)
+                    size = scaled_size(
+                        expected_shape,
+                        plane_spacing(series, "axial"),
+                        preserve_spacing=not args.no_preserve_spacing,
+                        max_size=args.max_size,
+                        pad_to_multiple=args.pad_to_multiple,
+                    )
+                elif tuple(slice_array.shape) != expected_shape:
+                    raise ValueError(f"Inconsistent slice shape {slice_array.shape}; expected {expected_shape}.")
+                frame = window_to_uint8(slice_array, low, high)
+                if invert:
+                    frame = np.uint8(255) - frame
+                assert size is not None
+                writer.append_data(video_frame_array(resize_frame(frame, size)))
+                frame_count += 1
+
+    if frame_count == 0:
+        raise ValueError("No pixel frames were loaded for this series.")
+    assert size is not None
+    return {
+        "plane": "axial",
         "path": str(dest),
         "frame_count": frame_count,
         "frame_rate": frame_rate,
@@ -790,7 +881,18 @@ def export_series(series: VideoSeries, args: argparse.Namespace, out_dir: Path, 
             ]
             return result
 
+        if planes == ["axial"]:
+            bounds = streaming_axial_window(series, args)
+            if bounds is not None:
+                dest = base.with_name(f"{base.name}_axial.mp4")
+                result["export_mode"] = "streaming_axial"
+                result["windowing"] = bounds[2]
+                result["videos"].append(export_axial_streaming(series, args, dest, frame_rate, bounds))
+                result["status"] = "exported"
+                return result
+
         volume, warnings, reference_ds, is_color = load_volume(series, args)
+        result["export_mode"] = "full_volume"
         result["loaded_shape"] = list(volume.shape)
         result["warnings"].extend(warnings)
         volume_uint8, windowing = window_volume(volume, reference_ds, args, is_color=is_color)
@@ -830,12 +932,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False)
-    if out_json:
-        Path(out_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_json).write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False))
+    _print_or_write(result, out_json, command_summary if summary else None)
 
 
 def run_command(args: argparse.Namespace) -> dict[str, Any]:

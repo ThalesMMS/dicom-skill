@@ -12,7 +12,6 @@ import argparse
 import json
 import shutil
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,33 +23,25 @@ except Exception as exc:  # pragma: no cover
     print(json.dumps({"error": f"pydicom is required: {exc}"}), file=sys.stderr)
     raise
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from _common import (
+    InputFile,
+    discover_dicom_files,
+    print_or_write as _print_or_write,
+    save_dataset_atomic,
+    uid_to_plain,
+    value_to_plain,
+)
+
 
 DEFAULT_SYNTAX = "lossless"
 JPEG2000_SYNTAXES = {
     "lossless": JPEG2000Lossless,
     "lossy": JPEG2000,
 }
-
-
-@dataclass(frozen=True)
-class InputFile:
-    source: Path
-    relative_output: Path
-
-
-def value_to_plain(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def uid_to_plain(value: Any) -> dict[str, Any] | None:
-    if value in (None, ""):
-        return None
-    uid = UID(str(value))
-    return {"uid": str(uid), "name": uid.name, "is_compressed": bool(uid.is_compressed)}
 
 
 def get_transfer_syntax(ds: Dataset) -> UID:
@@ -73,11 +64,7 @@ def sync_file_meta(ds: Dataset) -> None:
 
 
 def save_dataset(ds: Dataset, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        ds.save_as(str(dest), enforce_file_format=True)
-    except TypeError:  # older pydicom compatibility
-        ds.save_as(str(dest), write_like_original=False)
+    save_dataset_atomic(ds, dest)
 
 
 def parse_float_list(values: list[str] | None, option_name: str) -> list[float] | None:
@@ -92,34 +79,6 @@ def parse_float_list(values: list[str] | None, option_name: str) -> list[float] 
             except ValueError as exc:
                 raise ValueError(f"{option_name} must contain numbers, got: {part}") from exc
     return parsed or None
-
-
-def discover_dicom_files(paths: list[str], *, force: bool = False, max_files: int | None = None) -> list[InputFile]:
-    discovered: list[InputFile] = []
-    for item in paths:
-        path = Path(item).expanduser().resolve()
-        if path.is_file():
-            candidates = [(path, Path(path.name))]
-        elif path.is_dir():
-            root_name = path.name or "input"
-            candidates = [
-                (candidate, Path(root_name) / candidate.relative_to(path))
-                for candidate in path.rglob("*")
-                if candidate.is_file()
-            ]
-        else:
-            raise FileNotFoundError(f"Path not found: {item}")
-
-        for candidate, relative_output in candidates:
-            try:
-                ds = dcmread(str(candidate), stop_before_pixels=True, force=force)
-                if getattr(ds, "SOPClassUID", None):
-                    discovered.append(InputFile(candidate, relative_output))
-            except Exception:
-                continue
-            if max_files is not None and len(discovered) >= max_files:
-                return discovered
-    return discovered
 
 
 def compression_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -251,12 +210,7 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def print_or_write(result: dict[str, Any], out_json: str | None = None, summary: bool = False) -> None:
-    text = json.dumps(result, indent=2, ensure_ascii=False)
-    if out_json:
-        Path(out_json).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_json).write_text(text + "\n", encoding="utf-8")
-    printable = command_summary(result) if summary else result
-    print(json.dumps(printable, indent=2, ensure_ascii=False))
+    _print_or_write(result, out_json, command_summary if summary else None)
 
 
 def run_command(args: argparse.Namespace) -> dict[str, Any]:
