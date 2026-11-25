@@ -31,10 +31,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from _common import safe_path_component, write_bytes_atomic, write_private_text
+from _common import ensure_within, safe_path_component, write_bytes_atomic, write_private_text
 
 
-DEFAULT_IMAGE = "orthancteam/orthanc:latest"
+# Pinned so a run is reproducible and an upstream change cannot silently alter
+# the receiver. Override with --image when a newer release is wanted.
+DEFAULT_IMAGE = "orthancteam/orthanc:26.11.1"
+DEFAULT_DICOM_BIND = "0.0.0.0"
 DEFAULT_NAME = "dicom-skill-agent-orthanc"
 DEFAULT_AET = "AGENT"
 DEFAULT_DICOM_PORT = 4242
@@ -63,7 +66,20 @@ class OrthancState:
             return (self.http_user, self.http_password)
         return None
 
+    def to_public_dict(self) -> dict[str, Any]:
+        """State for stdout/audit JSON: the REST password is never included.
+
+        Command output can end up in an agent's context or platform logs. Later
+        status/export/stop calls read the password from the owner-only state
+        file in ``data_dir`` instead.
+        """
+        public = self.to_dict()
+        has_password = bool(public.pop("http_password", None))
+        public["http_password_saved"] = has_password
+        return public
+
     def to_dict(self) -> dict[str, Any]:
+        """Full state including the REST password; only for the private state file."""
         return {
             "name": self.name,
             "aet": self.aet,
@@ -132,8 +148,72 @@ def container_running(name: str) -> bool:
     return bool(cp.stdout.strip())
 
 
-def write_config(config_path: Path, aet: str, http_user: str | None = None, http_password: str | None = None) -> None:
-    config = {
+def parse_allowed_aets(values: list[str] | None) -> dict[str, dict[str, Any]]:
+    """Turn ``AET`` / ``AET@HOST`` entries into an Orthanc ``DicomModalities`` map.
+
+    Orthanc grants a registered modality every DIMSE permission unless the
+    entry says otherwise, regardless of the global ``DicomAlwaysAllow*``
+    options, so each entry is written in the object form with only C-ECHO and
+    C-STORE enabled.
+
+    Host checking (``DicomCheckModalityHost``) is a global switch: once one
+    entry pins a host, a plain ``AET`` entry could never match. Mixing the two
+    forms is therefore rejected instead of silently locking a sender out.
+    """
+    parsed: list[tuple[str, str]] = []
+    for raw in values or []:
+        aet, sep, host = str(raw).strip().partition("@")
+        aet = aet.strip()
+        host = host.strip()
+        if not aet or len(aet) > 16 or any(ch in aet for ch in "\\ \t\r\n"):
+            raise ValueError(f"Invalid AE title in --allow-aet value {raw!r}")
+        if sep and (not host or any(ch.isspace() for ch in host)):
+            raise ValueError(f"Invalid host in --allow-aet value {raw!r}")
+        parsed.append((aet, host))
+    if any(host for _, host in parsed) and not all(host for _, host in parsed):
+        raise ValueError(
+            "--allow-aet values mix AET and AET@HOST entries. Host checking applies to every "
+            "sender, so give a host for all entries or for none."
+        )
+    modalities: dict[str, dict[str, Any]] = {}
+    for index, (aet, host) in enumerate(parsed, start=1):
+        modalities[f"allowed{index}"] = {
+            "AET": aet,
+            # Host and port are only compared when host checking is on; Orthanc
+            # still requires the fields.
+            "Host": host or "127.0.0.1",
+            "Port": 104,
+            "AllowEcho": True,
+            "AllowStore": True,
+            "AllowFind": False,
+            "AllowGet": False,
+            "AllowMove": False,
+            "AllowStorageCommitment": False,
+        }
+    return modalities
+
+
+def write_config(
+    config_path: Path,
+    aet: str,
+    http_user: str | None = None,
+    http_password: str | None = None,
+    allowed_aets: list[str] | None = None,
+) -> None:
+    """Write a receive-only Orthanc configuration.
+
+    The temporary node only needs to accept C-ECHO and C-STORE addressed to its
+    own AE title. Query/retrieve (C-FIND/C-GET/C-MOVE) from other nodes is
+    refused, so data parked here cannot be listed or pulled over DICOM; the
+    skill reads it back through the authenticated, localhost-only REST API.
+
+    With ``allowed_aets``, only those calling AE titles may echo/store, and each
+    is registered with query/retrieve explicitly disabled. Entries written as
+    ``AET@HOST`` additionally pin the source address (all entries or none).
+    """
+    modalities = parse_allowed_aets(allowed_aets)
+    check_host = any("@" in str(value) for value in (allowed_aets or []))
+    config: dict[str, Any] = {
         "Name": "AgentTemporaryOrthanc",
         "StorageDirectory": "/var/lib/orthanc/db",
         "IndexDirectory": "/var/lib/orthanc/db",
@@ -143,15 +223,17 @@ def write_config(config_path: Path, aet: str, http_user: str | None = None, http
         "RemoteAccessAllowed": True,
         "AuthenticationEnabled": bool(http_user and http_password),
         "HttpDescribeErrors": True,
-        "DicomCheckCalledAet": False,
-        "DicomCheckModalityHost": False,
-        "DicomAlwaysAllowEcho": True,
-        "DicomAlwaysAllowStore": True,
-        "DicomAlwaysAllowFind": True,
-        "DicomAlwaysAllowGet": True,
-        "DicomAlwaysAllowMove": True,
+        "DicomCheckCalledAet": True,
+        "DicomCheckModalityHost": check_host,
+        "DicomAlwaysAllowEcho": not modalities,
+        "DicomAlwaysAllowStore": not modalities,
+        "DicomAlwaysAllowFind": False,
+        "DicomAlwaysAllowGet": False,
+        "DicomAlwaysAllowMove": False,
         "StoreDicom": True,
     }
+    if modalities:
+        config["DicomModalities"] = modalities
     if http_user and http_password:
         config["RegisteredUsers"] = {http_user: http_password}
     # The config can contain REST credentials; keep it owner-readable only.
@@ -210,7 +292,12 @@ def start_temp_orthanc(
     allow_port_conflict: bool = False,
     timeout: float = 30.0,
     http_auth: bool = True,
+    dicom_bind: str = DEFAULT_DICOM_BIND,
+    allowed_aets: list[str] | None = None,
 ) -> OrthancState:
+    parse_allowed_aets(allowed_aets)  # validate before touching Docker
+    if not dicom_bind or any(ch.isspace() for ch in dicom_bind):
+        raise ValueError(f"Invalid DICOM bind address {dicom_bind!r}")
     ensure_docker()
     if not allow_port_conflict:
         if is_port_busy("127.0.0.1", dicom_port) and not container_running(name):
@@ -250,7 +337,7 @@ def start_temp_orthanc(
     storage_path.mkdir(parents=True, exist_ok=True)
     http_user = DEFAULT_HTTP_USER if http_auth else None
     http_password = secrets.token_urlsafe(18) if http_auth else None
-    write_config(config_path, aet, http_user, http_password)
+    write_config(config_path, aet, http_user, http_password, allowed_aets)
 
     if pull:
         run(["docker", "pull", image], check=True, capture=False)
@@ -263,7 +350,7 @@ def start_temp_orthanc(
         "--name",
         name,
         "-p",
-        f"{dicom_port}:4242",
+        f"{dicom_bind}:{dicom_port}:4242",
         "-p",
         f"127.0.0.1:{http_port}:8042",
         "-v",
@@ -342,7 +429,7 @@ def export_instances(http_url: str, out_dir: str, clear_after: bool = False, aut
             study_uid = safe_path_component(tags.get("StudyInstanceUID"), "unknown_study")
             series_uid = safe_path_component(tags.get("SeriesInstanceUID"), "unknown_series")
             sop_uid = safe_path_component(tags.get("SOPInstanceUID"), str(instance_id))
-            dest = out / study_uid / series_uid / f"{sop_uid}.dcm"
+            dest = ensure_within(out, out / study_uid / series_uid / f"{sop_uid}.dcm")
             file_resp = session.get(f"{base}/instances/{instance_id}/file", timeout=60.0)
             file_resp.raise_for_status()
             write_bytes_atomic(dest, file_resp.content)
@@ -370,6 +457,20 @@ def build_parser() -> argparse.ArgumentParser:
     start_p.add_argument("--allow-port-conflict", action="store_true")
     start_p.add_argument("--timeout", type=float, default=30.0)
     start_p.add_argument("--no-http-auth", action="store_true", help="Start the REST API without authentication (not recommended)")
+    start_p.add_argument(
+        "--dicom-bind",
+        default=DEFAULT_DICOM_BIND,
+        help="Host address the DICOM port is published on. Default 0.0.0.0 so a remote PACS can deliver; "
+        "use a specific interface IP to narrow exposure, or 127.0.0.1 for local-only tests",
+    )
+    start_p.add_argument(
+        "--allow-aet",
+        action="append",
+        default=[],
+        metavar="AET[@HOST]",
+        help="Only accept C-ECHO/C-STORE from this calling AE title (repeatable). AET@HOST also pins the source "
+        "address; behind Docker NAT the source can appear as the bridge gateway, so test before relying on it",
+    )
 
     stop_p = sub.add_parser("stop", help="Stop temporary Orthanc")
     stop_p.add_argument("--name", default=DEFAULT_NAME)
@@ -383,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub_parser.add_argument(
             "--http-password",
             default=os.environ.get(PASSWORD_ENV),
-            help=f"REST password printed by the start command; defaults to ${PASSWORD_ENV}",
+            help=f"REST password; defaults to ${PASSWORD_ENV}, then to the owner-only state file saved by start",
         )
         sub_parser.add_argument("--data-dir", help="Data dir from the start command; default is derived from --name")
 
@@ -423,7 +524,9 @@ def main(argv: list[str] | None = None) -> int:
                 allow_port_conflict=args.allow_port_conflict,
                 timeout=args.timeout,
                 http_auth=not args.no_http_auth,
-            ).to_dict()
+                dicom_bind=args.dicom_bind,
+                allowed_aets=args.allow_aet,
+            ).to_public_dict()
         elif args.command == "stop":
             result = stop_temp_orthanc(name=args.name, purge=args.purge, data_dir=args.data_dir)
         elif args.command == "status":

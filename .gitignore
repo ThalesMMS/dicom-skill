@@ -9,3 +9,6 @@ __pycache__/
 *.local.yaml
 *.local.yml
 *.local.md
+
+# Build output of tools/build_skill_zip.py
+dist/

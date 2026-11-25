@@ -139,6 +139,26 @@ def docker_info() -> dict[str, Any]:
         return {"available": False, "path": docker_path, "reason": str(exc)}
 
 
+def rclone_info() -> dict[str, Any]:
+    """rclone is optional; only scripts/dicom_cloud_backup.py needs it."""
+    rclone_path = shutil.which("rclone")
+    if not rclone_path:
+        return {"available": False, "reason": "rclone executable not found"}
+    try:
+        cp = subprocess.run(
+            ["rclone", "version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=True,
+        )
+        first_line = (cp.stdout.splitlines() or [""])[0].strip()
+        return {"available": True, "path": rclone_path, "version": first_line}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "path": rclone_path, "reason": str(exc)}
+
+
 def port_busy(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.25)
@@ -152,6 +172,7 @@ def main() -> int:
         "codecs": {},
         "rsna_anonymizer_script": {},
         "docker": {},
+        "rclone": {},
         "ports": {},
     }
     packages = [
@@ -188,6 +209,7 @@ def main() -> int:
     if not result["rsna_anonymizer_script"].get("available"):
         result["ok"] = False
     result["docker"] = docker_info()
+    result["rclone"] = rclone_info()
     result["ports"] = {"4242_busy": port_busy(4242), "8042_busy": port_busy(8042)}
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result["ok"] else 1

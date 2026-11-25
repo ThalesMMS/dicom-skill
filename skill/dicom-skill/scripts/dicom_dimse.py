@@ -55,6 +55,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _common import (
     dataset_to_plain,
+    ensure_within,
     discover_dicom_files as _discover_input_files,
     print_or_write,
     safe_path_component,
@@ -62,11 +63,12 @@ from _common import (
 )
 
 try:
-    from orthanc_temp import export_instances, start_temp_orthanc, stop_temp_orthanc
+    from orthanc_temp import DEFAULT_IMAGE as DEFAULT_ORTHANC_IMAGE, export_instances, start_temp_orthanc, stop_temp_orthanc
 except Exception:  # pragma: no cover - retrieve --method move will fail clearly
     export_instances = None  # type: ignore
     start_temp_orthanc = None  # type: ignore
     stop_temp_orthanc = None  # type: ignore
+    DEFAULT_ORTHANC_IMAGE = "orthancteam/orthanc:26.11.1"
 
 
 DEFAULT_CALLING_AET = "AGENT"
@@ -285,10 +287,16 @@ def final_response_status(result: dict[str, Any]) -> dict[str, Any] | None:
     return status if isinstance(status, dict) else None
 
 
-def command_summary(result: dict[str, Any]) -> dict[str, Any]:
+SUMMARY_DEMOGRAPHIC_KEYS = ("PatientName", "PatientID")
+
+
+def command_summary(result: dict[str, Any], include_demographics: bool = False) -> dict[str, Any]:
     """Small, PHI-light summary intended for terminal/chat output.
 
     The full JSON result can still be persisted with --out-json for audit/debugging.
+    C-FIND matches omit patient demographics unless ``include_demographics`` is
+    set (``--summary-demographics``), which exists so a caller can verify the
+    exact registered patient before retrieving a study.
     """
     op = result.get("operation")
     summary: dict[str, Any] = {
@@ -311,6 +319,10 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
             }
             for m in (result.get("matches") or [])
         ]
+        if include_demographics:
+            for item, m in zip(summary["matches"], result.get("matches") or []):
+                for key in SUMMARY_DEMOGRAPHIC_KEYS:
+                    item[key] = m.get(key)
     elif op == "C-GET":
         final = final_response_status(result) or {}
         summary.update(
@@ -441,9 +453,9 @@ def path_for_store(out_dir: Path, ds: Dataset, fallback_index: int) -> Path:
     study_uid = safe_path_component(getattr(ds, "StudyInstanceUID", None), "unknown_study")
     series_uid = safe_path_component(getattr(ds, "SeriesInstanceUID", None), "unknown_series")
     sop_uid = safe_path_component(getattr(ds, "SOPInstanceUID", None), f"instance_{fallback_index:06d}")
-    dest_dir = out_dir / study_uid / series_uid
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    return dest_dir / f"{sop_uid}.dcm"
+    dest = ensure_within(out_dir, out_dir / study_uid / series_uid / f"{sop_uid}.dcm")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
 
 
 def configure_storage_contexts_for_get(ae: AE, sop_classes: list[str] | None = None) -> list[Any]:
@@ -467,9 +479,21 @@ def configure_storage_contexts_for_get(ae: AE, sop_classes: list[str] | None = N
     else:
         requested = [str(cx.abstract_syntax) for cx in StoragePresentationContexts[:120]]
 
+    # Prefer JPEG 2000 so a PACS capable of transcoding sends image instances
+    # in a compact clinical transfer syntax. Other common compressed and native
+    # syntaxes remain available because non-image objects (for example SR) and
+    # PACS implementations vary in what they can negotiate. Instances are
+    # written to disk exactly as received; nothing is decoded here.
     common_transfer_syntaxes = [
-        "1.2.840.10008.1.2",      # Implicit VR Little Endian
+        "1.2.840.10008.1.2.4.90", # JPEG 2000 lossless
+        "1.2.840.10008.1.2.4.91", # JPEG 2000
+        "1.2.840.10008.1.2.4.80", # JPEG-LS lossless
+        "1.2.840.10008.1.2.4.81", # JPEG-LS near-lossless
+        "1.2.840.10008.1.2.4.50", # JPEG baseline
+        "1.2.840.10008.1.2.4.51", # JPEG extended
+        "1.2.840.10008.1.2.5",    # RLE lossless
         "1.2.840.10008.1.2.1",    # Explicit VR Little Endian
+        "1.2.840.10008.1.2",      # Implicit VR Little Endian
         "1.2.840.10008.1.2.1.99", # Deflated Explicit VR Little Endian
         "1.2.840.10008.1.2.2",    # Explicit VR Big Endian
     ]
@@ -549,6 +573,8 @@ def command_retrieve_move(args: argparse.Namespace, remote: RemoteNode, identifi
             image=args.orthanc_image,
             pull=args.orthanc_pull,
             timeout=args.orthanc_timeout,
+            dicom_bind=args.orthanc_dicom_bind,
+            allowed_aets=args.orthanc_allow_aet or None,
         )
         temp_data_dir = state.data_dir
 
@@ -565,7 +591,8 @@ def command_retrieve_move(args: argparse.Namespace, remote: RemoteNode, identifi
         "responses": [],
     }
     if state is not None:
-        result["temporary_orthanc"] = state.to_dict()
+        # Public view only: the REST password must not reach stdout or the audit JSON.
+        result["temporary_orthanc"] = state.to_public_dict()
 
     try:
         with dicom_association(ae, remote, args, result) as assoc:
@@ -685,6 +712,23 @@ def add_remote_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--debug", action="store_true", help="Enable pynetdicom debug logging")
     parser.add_argument("--out-json", help="Write JSON result to this file as well as stdout")
     parser.add_argument("--summary", action="store_true", help="Print concise PHI-light summary to stdout; --out-json still stores full JSON")
+    parser.add_argument(
+        "--summary-demographics",
+        action="store_true",
+        help="Implies --summary and adds PatientName/PatientID to C-FIND summary matches (contains PHI); use to verify the exact registered patient before retrieval",
+    )
+
+
+class SingleValueAction(argparse.Action):
+    """Reject a repeated single-value option instead of silently keeping the last one."""
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: str | None = None) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(
+                f"{option_string} was given more than once; each retrieve handles a single value. "
+                "Run one retrieve command per UID and keep one --out-json per retrieval."
+            )
+        setattr(namespace, self.dest, values)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -706,10 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_p.add_argument("--method", choices=["get", "move"], default="get")
     retrieve_p.add_argument("--model", choices=sorted(GET_MODELS), default="study")
     retrieve_p.add_argument("--level", help="PATIENT, STUDY, SERIES, IMAGE/INSTANCE; inferred from UID args if omitted")
-    retrieve_p.add_argument("--patient-id")
-    retrieve_p.add_argument("--study-uid")
-    retrieve_p.add_argument("--series-uid")
-    retrieve_p.add_argument("--sop-uid")
+    retrieve_p.add_argument("--patient-id", action=SingleValueAction)
+    retrieve_p.add_argument("--study-uid", action=SingleValueAction, help="Study Instance UID; one per command")
+    retrieve_p.add_argument("--series-uid", action=SingleValueAction, help="Series Instance UID; one per command")
+    retrieve_p.add_argument("--sop-uid", action=SingleValueAction, help="SOP Instance UID; one per command")
     retrieve_p.add_argument("--filter", action="append", default=[], help="Additional retrieve key, KEY=VALUE; can be repeated")
     retrieve_p.add_argument("--store-sop-class", action="append", default=[], help="Limit incoming C-STORE negotiation for C-GET to these SOP Class UIDs; repeat as needed")
     retrieve_p.add_argument("--out", required=True, help="Directory for retrieved/exported DICOM files")
@@ -720,7 +764,9 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_p.add_argument("--orthanc-http-port", type=int, default=8042)
     retrieve_p.add_argument("--orthanc-name", default="dicom-skill-agent-orthanc")
     retrieve_p.add_argument("--orthanc-data-dir")
-    retrieve_p.add_argument("--orthanc-image", default="orthancteam/orthanc:latest")
+    retrieve_p.add_argument("--orthanc-image", default=DEFAULT_ORTHANC_IMAGE, help="Pinned by default; override to use another release")
+    retrieve_p.add_argument("--orthanc-dicom-bind", default="0.0.0.0", help="Host address the temporary Orthanc DICOM port is published on; narrow it to one interface IP when possible")
+    retrieve_p.add_argument("--orthanc-allow-aet", action="append", default=[], metavar="AET[@HOST]", help="Only accept C-STORE into the temporary Orthanc from this calling AE title (repeatable); default accepts any calling AE")
     retrieve_p.add_argument("--orthanc-pull", action="store_true")
     retrieve_p.add_argument("--orthanc-timeout", type=float, default=30.0)
     retrieve_p.add_argument("--post-move-wait", type=float, default=1.0)
@@ -754,7 +800,11 @@ def main(argv: list[str] | None = None) -> int:
         else:  # pragma: no cover
             parser.error("Unknown command")
             return 2
-        print_or_write(result, getattr(args, "out_json", None), command_summary if getattr(args, "summary", False) else None)
+        demographics = bool(getattr(args, "summary_demographics", False))
+        summary_fn = None
+        if demographics or getattr(args, "summary", False):
+            summary_fn = lambda r: command_summary(r, include_demographics=demographics)  # noqa: E731
+        print_or_write(result, getattr(args, "out_json", None), summary_fn)
         # Non-zero exit for clear failures, but keep DICOM warning statuses in JSON.
         if result.get("error"):
             return 1

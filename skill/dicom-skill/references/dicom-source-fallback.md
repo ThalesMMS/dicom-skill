@@ -10,11 +10,17 @@ keys with placeholder nodes.
 
 ## Pattern
 
-1. C-ECHO the first node in `source_fallback` to confirm connectivity.
+1. C-ECHO the first node in `source_fallback` to confirm connectivity. If the
+   association is rejected or cannot connect, retry once, then move on to
+   the next node.
 2. Study-level C-FIND with the patient-name wildcard and, when no date is
    given, today's `StudyDate`.
 3. If there is no match, repeat on the next node in the list.
-4. Stop at the first node that returns the study, then retrieve from there.
+4. Stop at the first node that returns the study, verify the exact registered
+   `PatientName` there, then retrieve from that node.
+5. Conclude "not found" only after every node in the list answered a
+   successful association and returned no match; report which nodes were
+   checked. A verified no-match is a result, not a retrieval failure.
 
 ## Example (placeholder nodes)
 
@@ -35,5 +41,9 @@ python scripts/dicom_dimse.py query --config examples/dicom_nodes.local.yaml --n
 Notes:
 
 - Node hosts, ports, and AE titles belong only in the private local config.
+- Run the same date/name criteria on every node, including inclusive ranges
+  such as `StudyDate=20250101-20250107`.
+- See `clinical-request-workflow.md` for exact-name verification and
+  multi-study retrieval.
 - Some sources support only `patient`/`study` query models; do not force a
   `series` C-FIND. Retrieve the study and inspect series locally.

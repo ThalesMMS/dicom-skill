@@ -86,7 +86,27 @@ def safe_path_component(value: Any, fallback: str, *, max_len: int = 180) -> str
             keep.append(ch)
         else:
             keep.append("_")
-    return "".join(keep)[:max_len] or fallback
+    cleaned = "".join(keep)[:max_len]
+    # The value comes from DICOM metadata, which an untrusted sender controls.
+    # "." and ".." (or any dots-only name) would let it steer the output path;
+    # trailing dots/spaces are also silently dropped by Windows.
+    cleaned = cleaned.rstrip(". ")
+    if not cleaned.strip("."):
+        return fallback
+    return cleaned
+
+
+def ensure_within(base: Path, candidate: Path) -> Path:
+    """Return ``candidate`` resolved, or raise if it escapes ``base``.
+
+    Defense in depth for paths assembled from DICOM metadata: even with
+    sanitized components, a write must never land outside the output directory.
+    """
+    base_resolved = Path(base).resolve()
+    resolved = Path(candidate).resolve()
+    if resolved != base_resolved and base_resolved not in resolved.parents:
+        raise ValueError(f"Refusing to write outside the output directory: {candidate}")
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -140,12 +160,15 @@ def print_or_write(
     out_json: str | None = None,
     summary_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> None:
-    """Print the result JSON (or its summary) and optionally persist the full JSON."""
+    """Print the result JSON (or its summary) and optionally persist the full JSON.
+
+    The persisted file is the full audit record and can contain patient names
+    and identifiers, so it is written owner-readable only (mode 0600).
+    """
     text = json.dumps(result, indent=2, ensure_ascii=False, default=json_default)
     if out_json:
         path = Path(out_json).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
+        write_private_text(path, text + "\n")
     printable = summary_fn(result) if summary_fn else result
     print(json.dumps(printable, indent=2, ensure_ascii=False, default=json_default))
 

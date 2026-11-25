@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from _common import (
     discover_dicom_files,
     print_or_write as _print_or_write,
+    ensure_within,
     safe_path_component as sanitize_component,
     save_dataset_atomic,
     write_private_text,
@@ -57,6 +59,12 @@ DEFAULT_SITE_ID = "999999"
 DEFAULT_PROJECT_NAME = "dicom-skill"
 DEFAULT_UID_ROOT = "2.25"
 DEFAULT_DEIDENTIFICATION_METHOD = "RSNA DICOM ANONYMIZER DERIVED WORKFLOW"
+CONFIG_DIR_ENV = "DICOM_SKILL_CONFIG_DIR"
+DEIDENTIFICATION_LIMITATIONS = (
+    "Metadata-only pseudonymization by tag rules. Burned-in pixel text, facial features in "
+    "head/neck volumes, free-text or private elements the script retains, and embedded documents "
+    "are not reviewed. Not a guarantee of complete de-identification; review before external sharing."
+)
 DEFAULT_DATE = "20000101"
 DICOM_UID_MAX_LEN = 64
 
@@ -483,9 +491,46 @@ def output_path_for_dataset(out_dir: Path, ds: Dataset, fallback_index: int) -> 
     study = sanitize_component(getattr(ds, "StudyInstanceUID", None), "unknown_study")
     series = sanitize_component(getattr(ds, "SeriesInstanceUID", None), "unknown_series")
     sop = sanitize_component(getattr(ds, "SOPInstanceUID", None), f"instance_{fallback_index:06d}")
-    dest_dir = out_dir / patient / study / series
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    return dest_dir / f"{sop}.dcm"
+    dest = ensure_within(out_dir, out_dir / patient / study / series / f"{sop}.dcm")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def default_salt_path(site_id: str, project_name: str) -> Path:
+    """Per-project secret location, outside any output or repository folder."""
+    base = os.environ.get(CONFIG_DIR_ENV)
+    root = Path(base).expanduser() if base else Path.home() / ".config" / "dicom-skill"
+    name = f"{sanitize_component(site_id, 'site')}__{sanitize_component(project_name, 'project')}.salt"
+    return root / "salts" / name
+
+
+def resolve_salt(args: argparse.Namespace) -> tuple[str, str]:
+    """Return ``(salt, source)`` without ever falling back to a guessable value.
+
+    Order: --salt-env, --salt, then a secret file (--salt-file or the
+    per-project default). A missing file is created with a random secret, so
+    the pseudonyms cannot be recomputed by someone who only knows the site ID
+    and project name, while repeated runs on this machine stay consistent.
+    """
+    if args.salt_env:
+        value = os.environ.get(args.salt_env)
+        if value:
+            return value, f"environment:{args.salt_env}"
+        if not args.salt and not args.salt_file:
+            raise ValueError(f"Environment variable {args.salt_env} is empty or not set")
+    if args.salt:
+        return args.salt, "argument"
+    path = Path(args.salt_file).expanduser().resolve() if args.salt_file else default_salt_path(args.site_id, args.project_name)
+    if path.exists():
+        value = path.read_text(encoding="utf-8").strip()
+        if not value:
+            raise ValueError(f"Salt file is empty: {path}")
+        return value, f"file:{path}"
+    if args.dry_run:
+        return secrets.token_hex(32), "ephemeral (dry run)"
+    value = secrets.token_hex(32)
+    write_private_text(path, value + "\n")
+    return value, f"file:{path} (created)"
 
 
 def write_dataset(ds: Dataset, path: Path) -> None:
@@ -498,11 +543,7 @@ def command_anonymize(args: argparse.Namespace) -> dict[str, Any]:
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    salt = args.salt
-    if args.salt_env:
-        salt = os.environ.get(args.salt_env, salt)
-    if not salt:
-        salt = f"{args.site_id}|{args.project_name}|dicom-skill-rsna-derived"
+    salt, salt_source = resolve_salt(args)
 
     mapping_path = Path(args.map_json).expanduser().resolve() if args.map_json else None
     mapping = (
@@ -543,7 +584,10 @@ def command_anonymize(args: argparse.Namespace) -> dict[str, Any]:
         "failure_count": 0,
         "dry_run": bool(args.dry_run),
         "remove_private_tags": bool(rules.remove_private_tags and not args.keep_private_tags),
+        "salt_source": salt_source,
         "pixel_phi_removal": False,
+        "deidentification_complete": False,
+        "limitations": DEIDENTIFICATION_LIMITATIONS,
         "deidentification_method": DEFAULT_DEIDENTIFICATION_METHOD,
         "items": [] if args.include_files else None,
         "failures": [],
@@ -611,6 +655,9 @@ def command_summary(result: dict[str, Any]) -> dict[str, Any]:
         "out_dir": result.get("out_dir"),
         "dry_run": result.get("dry_run"),
         "pixel_phi_removal": result.get("pixel_phi_removal"),
+        "deidentification_complete": result.get("deidentification_complete"),
+        "limitations": result.get("limitations"),
+        "salt_source": result.get("salt_source"),
         "deidentification_method": result.get("deidentification_method"),
         "map_json": result.get("map_json"),
         "map_json_warning": result.get("map_json_warning"),
@@ -634,6 +681,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--uid-root", default=DEFAULT_UID_ROOT, help="UID root. Default 2.25 uses deterministic UUID-style OIDs. Provide your registered root for production.")
     parser.add_argument("--salt", help="Project salt for deterministic UID/accession/patient hashing")
     parser.add_argument("--salt-env", help="Read project salt from this environment variable")
+    parser.add_argument(
+        "--salt-file",
+        help="File holding the project salt; created with a random secret (mode 0600) when missing. "
+        "Default when no salt is given: a per-site/project file under ~/.config/dicom-skill/salts "
+        f"(or ${CONFIG_DIR_ENV}). Back it up if pseudonyms must stay reproducible",
+    )
     parser.add_argument("--patient-id-strategy", choices=["sequential", "hashed"], default="sequential")
     parser.add_argument("--map-json", help="Optional PHI-containing mapping JSON to load/update across runs")
     parser.add_argument("--force", action="store_true", help="Force pydicom reads for non-standard files")

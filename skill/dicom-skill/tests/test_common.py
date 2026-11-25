@@ -60,6 +60,7 @@ def test_save_dataset_atomic_writes_readable_file(tmp_path: Path):
 def test_write_private_text_mode(tmp_path: Path):
     dest = tmp_path / "secret.json"
     _common.write_private_text(dest, "{}")
-    mode = stat.S_IMODE(os.stat(dest).st_mode)
-    assert mode == 0o600
+    if os.name != "nt":  # POSIX permission bits are not enforced on Windows
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        assert mode == 0o600
     assert dest.read_text(encoding="utf-8") == "{}"

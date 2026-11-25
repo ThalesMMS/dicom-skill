@@ -82,8 +82,9 @@ def test_mapping_file_is_private(tmp_path: Path, capsys):
     capsys.readouterr()
 
     assert map_json.exists()
-    mode = stat.S_IMODE(os.stat(map_json).st_mode)
-    assert mode == 0o600
+    if os.name != "nt":  # POSIX permission bits are not enforced on Windows
+        mode = stat.S_IMODE(os.stat(map_json).st_mode)
+        assert mode == 0o600
     raw = json.loads(map_json.read_text(encoding="utf-8"))
     assert "PAT001" in raw["patients"]
 

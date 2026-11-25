@@ -85,6 +85,12 @@ def make_ct_dataset(
     return ds
 
 
+@pytest.fixture(autouse=True)
+def isolated_skill_config(tmp_path_factory, monkeypatch):
+    """Keep generated secrets (for example anonymizer salt files) out of the real home directory."""
+    monkeypatch.setenv("DICOM_SKILL_CONFIG_DIR", str(tmp_path_factory.mktemp("dicom-skill-config")))
+
+
 @pytest.fixture
 def ct_dataset() -> FileDataset:
     return make_ct_dataset()

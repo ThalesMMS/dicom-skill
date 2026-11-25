@@ -1,6 +1,17 @@
 # dicom-skill
 
-`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, wrapping PDFs as DICOM Encapsulated PDF instances, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, rendering PNG previews from local instances, and exporting local DICOM image series to MP4 videos.
+**An open-source Agent Skill that lets AI agents query, retrieve, transfer, anonymize, visualize, and back up medical imaging studies on DICOM-compatible systems from natural-language requests.**
+
+Ask for the outcome; the agent runs the DICOM operations and reports what it verified:
+
+- "Transfer all MRI studies from last month to my backup PACS."
+- "Anonymize this study and show me a preview."
+- "Attach this PDF report to the study and send it to Orthanc."
+- "Back up yesterday's CT studies to cloud storage every morning."
+
+> **Not a medical device.** This project is an engineering toolkit provided as-is under the Apache 2.0 license. It is not validated for diagnosis or clinical decision-making and carries no regulatory clearance. Whoever deploys it is responsible for authorization, privacy and data-protection compliance (for example HIPAA, GDPR, LGPD), institutional approval, and validation in their own environment. See [Safety model](#safety-model) and [`SECURITY.md`](SECURITY.md).
+
+`dicom-skill` is an agent-ready shell skill for DICOM DIMSE and local pixel-data workflows. It gives an agent a small, auditable command-line toolkit for verifying DICOM nodes, querying metadata, retrieving studies, anonymizing local payloads, wrapping PDFs as DICOM Encapsulated PDF instances, sending DICOM files between PACS, VNA or other DIMSE-compatible systems, transcoding local DICOM files to or from JPEG 2000, rendering PNG previews from local instances, and exporting local DICOM image series to MP4 videos. It also documents the routine clinical requests built on those operations (finding and verifying a named patient's exam, listing a day's studies, packaging a study for delivery) and ships a resumable per-study backup to cloud storage through rclone.
 
 This repository contains the publishable skill package under
 [`skill/dicom-skill/`](skill/dicom-skill/). The repository root holds GitHub
@@ -11,11 +22,13 @@ operational contract lives in
 directly from an agent shell.
 
 <p align="center">
-  <img src="screenshot1.png" alt="WhatsApp conversation showing DICOM study transfer and verification through dicom-skill" width="24%">
-  <img src="screenshot2.png" alt="WhatsApp conversation showing scheduled PACS backup automation and test-run report through dicom-skill" width="24%">
-  <img src="screenshot3.png" alt="Additional dicom-skill workflow screenshot 3" width="24%">
-  <img src="screenshot4.png" alt="Additional dicom-skill workflow screenshot 4" width="24%">
+  <img src="screenshot1.png" alt="Chat conversation showing DICOM study transfer and verification through dicom-skill" width="24%">
+  <img src="screenshot2.png" alt="Chat conversation showing scheduled PACS backup automation and test-run report through dicom-skill" width="24%">
+  <img src="screenshot3.png" alt="Chat conversation showing anonymization and a blurred preview through dicom-skill" width="24%">
+  <img src="screenshot4.png" alt="Chat conversation showing a PDF report attached, compressed, and sent to a PACS through dicom-skill" width="24%">
 </p>
+
+<sub>Screenshots are from a test setup. Addresses, paths, and file names were replaced and the radiograph thumbnails blurred.</sub>
 
 ## What it does
 
@@ -31,6 +44,9 @@ directly from an agent shell.
 - Render local DICOM instances to PNG preview images.
 - Export local DICOM image series to MP4, with automatic CT and MR defaults and explicit selection for other modalities.
 - Emit JSON output for audit trails, with an optional PHI-light summary mode for terminal or chat output.
+- Handle patient exam requests safely: exact registered-name verification before retrieval, ordered source fallback, one retrieve per study, and literal reporting of what the PACS returned.
+- Package a retrieved study as a clean, relative-path ZIP and verify an upload before cleaning up.
+- Back up whole studies to any rclone remote, one verified ZIP per study, with bounded queries, a disk-space watchdog, lossless transcoding of uncompressed studies, atomic uploads, and resumable SQLite state.
 
 ## Safety model
 
@@ -40,13 +56,19 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - Prefer C-ECHO before query, retrieve, or send operations.
 - Prefer the least invasive DIMSE operation that satisfies the task.
 - Never delete, overwrite, or modify remote DICOM data.
+- Authorization is per action and per destination: permission to query or retrieve a study does not cover sending it to a chat app, e-mail, or cloud storage. Recurring transfers and backups need their own explicit instruction.
 - Keep retrieved payloads in explicit, user-controlled folders.
 - Preserve JSON/log audit artifacts by default.
 - Do not print full patient data unless the user explicitly asks for it.
 - Treat anonymization as an explicit, local file operation. Do not assume retrieved data is anonymous until `scripts/dicom_anonymize.py` has been run and the result has been checked.
-- The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal.
+- The anonymizer removes metadata PHI according to the bundled script, but it does not perform OCR or burned-in pixel PHI removal. Treat its output as pseudonymized metadata, not as proof of complete de-identification.
+- Audit JSON files (`--out-json`) can contain patient names and identifiers; they are written owner-readable only (mode 0600).
+- Output paths built from DICOM metadata are sanitized and confined to the output directory.
 - Treat dicomized PDFs as sensitive because the PDF bytes are embedded as-is.
 - Treat PNG previews and MP4 videos as sensitive because burned-in pixel annotations can remain visible.
+- A wildcard patient-name match is a candidate, not a confirmation: verify the full registered name before retrieving or sending a study.
+- ZIP exports and cloud backups contain original, identifiable DICOM. Send them only to destinations approved for clinical data, or anonymize first.
+- Keep site specifics (endpoints, delivery destinations, request shorthand) in gitignored `*.local.yaml` / `*.local.md` files.
 
 ## Repository layout
 
@@ -54,6 +76,9 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 .
 ├── README.md                # GitHub/project overview
 ├── LICENSE.txt              # Apache License 2.0
+├── SECURITY.md              # How to report vulnerabilities; data-handling notes
+├── CHANGELOG.md             # Release notes
+├── tools/build_skill_zip.py # Builds dist/dicom-skill.zip for skill installation
 ├── screenshot1.png          # README media
 ├── screenshot2.png          # README media
 ├── screenshot3.png          # README media
@@ -69,16 +94,23 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
         │   ├── dicom_nodes.yaml
         │   ├── dicom_nodes.local.yaml.example   # Template for private nodes (gitignored copy)
         │   ├── orthanc-local.md
-        │   └── pdf-dicomize-local.md
+        │   ├── pdf-dicomize-local.md
+        │   └── systemd/             # Example units/timer for the cloud backup
         ├── references/
-        │   ├── mp4-export-workflow.md   # Series-to-MP4 selection/export pattern
-        │   └── dicom-source-fallback.md # Querying multiple source nodes in order
+        │   ├── mp4-export-workflow.md        # Series-to-MP4 selection/export pattern
+        │   ├── dicom-source-fallback.md      # Querying multiple source nodes in order
+        │   ├── clinical-request-workflow.md  # Patient exam requests and listings
+        │   ├── study-delivery-workflow.md    # Retrieve, ZIP, upload, verify
+        │   ├── cloud-backup-runbook.md       # Operating the rclone study backup
+        │   ├── troubleshooting.md            # Symptoms and fixes
+        │   └── site-workflows.local.md.example  # Template for private site conventions
         ├── resources/
         │   └── rsna/                # Bundled RSNA anonymizer script and license
         ├── scripts/
         │   ├── _common.py           # Shared helpers (discovery, JSON, atomic writes)
         │   ├── dicom_dimse.py
         │   ├── dicom_anonymize.py
+        │   ├── dicom_cloud_backup.py
         │   ├── dicom_jpeg2000.py
         │   ├── dicom_pdf.py
         │   ├── dicom_preview.py
@@ -102,6 +134,7 @@ DICOM metadata and pixel data can contain patient-identifying information. This 
 - `imageio`
 - `imageio-ffmpeg`
 - Docker, only when using the temporary Orthanc helper
+- `rclone` with a configured remote, only when using the cloud backup script
 
 Install from the skill package folder:
 
@@ -437,7 +470,10 @@ python scripts/dicom_anonymize.py \
   --out-json audit/anonymize_result.json
 ```
 
-Use `--salt-env ENV_NAME` or `--salt VALUE` for deterministic pseudonymization.
+Pseudonyms are keyed by a secret project salt: pass `--salt-env ENV_NAME`
+(preferred) or `--salt VALUE`. Without either, a random per-site/project
+secret is created once under `~/.config/dicom-skill/salts/` (override with
+`--salt-file`) and reused, so nothing is derived from guessable parameters.
 The salt also drives the per-patient date shift, so reuse the same salt when
 UIDs and shifted dates must stay consistent across runs. Use
 `--map-json secure/anon_map.json` only when mappings must persist across
@@ -506,6 +542,82 @@ python scripts/dicom_dimse.py send \
   --out-json audit/send_result.json
 ```
 
+### 12. Find a named patient's exam
+
+Query with a wildcard, then confirm the exact registered patient before
+retrieving. `--summary` hides demographics; `--summary-demographics` adds
+`PatientName` and `PatientID` to the summary for this verification step, and
+the `--out-json` file always holds the full response.
+
+```bash
+python scripts/dicom_dimse.py query \
+  --config examples/dicom_nodes.local.yaml --node primary \
+  --model study --level STUDY \
+  --filter 'PatientName=DOE*' --filter StudyDate=20250101 \
+  --return PatientName --return PatientID --return StudyTime \
+  --return StudyDescription --return ModalitiesInStudy \
+  --return NumberOfStudyRelatedInstances --return StudyInstanceUID \
+  --summary-demographics --out-json audit/find_patient.json
+```
+
+If several different patients match, list them and ask which one is intended.
+Retrieve one `StudyInstanceUID` per command; a repeated `--study-uid` is
+rejected instead of silently keeping the last value. See
+[`references/clinical-request-workflow.md`](skill/dicom-skill/references/clinical-request-workflow.md)
+for listings, multiple patients, source fallback, and what a DICOM query cannot
+answer (report status, deletions).
+
+### 13. Package and deliver a study
+
+```bash
+cd audit && zip -qr study.zip downloads
+unzip -Z1 study.zip | head
+```
+
+Archive a relative folder from its parent directory so no machine path ends up
+in the ZIP, check the `.dcm` count against the retrieve summary, upload with
+the tool your environment provides, and read back the uploaded file's metadata
+before removing local payloads. See
+[`references/study-delivery-workflow.md`](skill/dicom-skill/references/study-delivery-workflow.md).
+
+### 14. Back up studies to cloud storage
+
+`scripts/dicom_cloud_backup.py` copies whole studies to an rclone remote as
+`<remote-root>/YYYY/MM/DD/<StudyInstanceUID>.zip`. Nothing site-specific is
+built in; the node, remote, and date range are arguments.
+
+```bash
+# Previous day's studies
+python scripts/dicom_cloud_backup.py \
+  --dicom-config examples/dicom_nodes.local.yaml \
+  --remote-root myremote:dicom-backup \
+  run --lane daily --node primary
+
+# Historical range, resumable
+python scripts/dicom_cloud_backup.py \
+  --dicom-config examples/dicom_nodes.local.yaml \
+  --remote-root myremote:dicom-backup \
+  run --lane backfill --node secondary --start 20200101 --end 20241231
+
+python scripts/dicom_cloud_backup.py status
+python scripts/dicom_cloud_backup.py --remote-root myremote:dicom-backup verify
+```
+
+Safeguards: bounded `StudyDate` queries only, received instances checked
+against an IMAGE-level C-FIND, lossless JPEG 2000 transcoding when a study
+arrives mostly uncompressed, stored ZIP64 with CRC validation, upload to a
+temporary name followed by size and SHA-1 verification, no overwrite of a
+differing remote object, a free-disk floor checked before and during each
+study, and one worker per lane. Logs and the manifest carry dates, UIDs,
+counts, sizes, and hashes, never patient demographics. The archives
+themselves are identifiable DICOM and are not encrypted by the script, so use
+a destination approved for clinical data.
+
+Read
+[`references/cloud-backup-runbook.md`](skill/dicom-skill/references/cloud-backup-runbook.md)
+before running it unattended; example systemd units are in
+[`examples/systemd/`](skill/dicom-skill/examples/systemd/).
+
 ## Temporary Orthanc helper
 
 The helper starts an ephemeral Orthanc container with:
@@ -513,8 +625,12 @@ The helper starts an ephemeral Orthanc container with:
 - AE title: `AGENT`
 - Host DICOM port: `4242`
 - REST API: `http://127.0.0.1:8042`, protected by a per-run generated password
-- Remote access enabled inside the container
-- Called AE and modality host checks disabled for the temporary receiver
+- Receive-only DICOM: C-ECHO and C-STORE to its own AE title are accepted;
+  C-FIND, C-GET, and C-MOVE are refused
+- A pinned container image (`orthancteam/orthanc:26.11.1`; override with `--image`)
+- Optional sender restriction with `--allow-aet AET` or `--allow-aet AET@HOST`
+  (allowed senders stay store-only; use one form for all entries, not a mix)
+- Optional `--dicom-bind <interface IP>` to publish the DICOM port on one interface
 
 Manual lifecycle:
 
@@ -534,7 +650,8 @@ destination.
 owner-only permissions in the helper's data dir. The data dir defaults to a
 deterministic per-container-name location, so `status`, `export`, and
 `stop --purge` invoked with the same `--name` (or the default name) find the
-credentials and storage automatically — no password needs to be passed around.
+credentials and storage automatically — no password needs to be passed around,
+and it is never printed to stdout or written to audit JSON.
 For custom setups, credentials can be supplied via `--data-dir`,
 `--http-user`/`--http-password`, or the `DICOM_SKILL_ORTHANC_PASSWORD`
 environment variable. Pass `--no-http-auth` to `start` only when an
@@ -546,6 +663,8 @@ unauthenticated localhost REST API is acceptable. The
 All DIMSE, anonymization, PDF dicomizer, JPEG 2000, PNG preview, and MP4 export commands print JSON. Use:
 
 - `--summary` for concise, PHI-light terminal output.
+- `--summary-demographics` (C-FIND) to add `PatientName`/`PatientID` to the
+  summary when the exact patient must be verified. This output contains PHI.
 - `--out-json path/to/result.json` to persist the full result for audit/debugging.
 - Explicit output directories such as `downloads/`, `anonymized/`, `previews/`,
   `videos/`, or `audit/` for payloads and command results.
@@ -570,6 +689,26 @@ and whether the remote node allows the calling AE.
 
 Confirm the query model (`study` vs. `patient`), query level, date format,
 wildcard policy, and whether the server supports the requested return tags.
+
+**The query summary shows no patient name**
+
+That is the PHI-light default. Use `--summary-demographics`, or read
+`matches[]` in the `--out-json` file.
+
+**`retrieve` fails with "was given more than once"**
+
+Each retrieve handles one UID. Run one command per `StudyInstanceUID`.
+
+**Retrieved files are compressed (JPEG 2000 / JPEG-LS)**
+
+C-GET offers compressed transfer syntaxes first and stores instances as
+received. Use `scripts/dicom_jpeg2000.py decompress` or install the matching
+pydicom pixel decoder when a downstream tool needs uncompressed data.
+
+**Cloud backup stops with `DiskPressure`, `Remote conflict`, or a hash mismatch**
+
+These are safeguards. Do not delete state, ZIPs, or remote objects to get
+past them; follow the runbook.
 
 **C-GET retrieves fewer instances than expected**
 
@@ -650,6 +789,7 @@ Inspect command help:
 python scripts/dicom_dimse.py --help
 python scripts/dicom_dimse.py query --help
 python scripts/dicom_anonymize.py --help
+python scripts/dicom_cloud_backup.py --help
 python scripts/dicom_jpeg2000.py --help
 python scripts/dicom_pdf.py --help
 python scripts/dicom_preview.py --help
@@ -665,6 +805,20 @@ For PDF wrapping, see
 [`skill/dicom-skill/examples/pdf-dicomize-local.md`](skill/dicom-skill/examples/pdf-dicomize-local.md).
 For MP4 export, see
 [`skill/dicom-skill/examples/series-video-local.md`](skill/dicom-skill/examples/series-video-local.md).
+
+### Releases and packaging
+
+- [`requirements-tested.txt`](skill/dicom-skill/requirements-tested.txt) records
+  the exact dependency versions the suite last passed with;
+  `requirements.txt` keeps compatible ranges.
+- [`CHANGELOG.md`](CHANGELOG.md) tracks releases.
+- Build the installable skill archive (only `dicom-skill/`, with the license
+  and without tests or caches):
+
+  ```bash
+  python tools/build_skill_zip.py
+  # -> dist/dicom-skill.zip
+  ```
 
 ## RSNA anonymizer note
 

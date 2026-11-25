@@ -1,0 +1,49 @@
+# Site workflows (private template)
+
+Copy this file to `site-workflows.local.md` in the same folder and adapt it.
+`*.local.md` is gitignored, so machine- and site-specific conventions stay out
+of the repository. Read the private copy, when it exists, before handling a
+shorthand request.
+
+Do not record patient names, IDs, accession numbers, or study UIDs here. Use
+placeholders such as `<patient>` and `<date>`.
+
+## Source nodes
+
+Real hosts, ports, and AE titles belong in `examples/dicom_nodes.local.yaml`.
+List only the node keys and their role here:
+
+- `primary`: default source for same-day exams
+- `secondary`: fallback / long-term archive
+
+## Request shorthand used at this site
+
+| The user says | Meaning at this site |
+|---|---|
+| "send me the exam of <patient>" | find today's study, verify the exact patient, C-GET, ZIP, upload to `<destination>`, reply with the link |
+| "video of <patient>" | same lookup, then export the relevant series to MP4 and attach it |
+
+## Delivery destinations
+
+- Default upload destination: `<drive folder or rclone remote path>`
+- Upload tool available to the agent: `<tool name>`
+- Chat attachment convention: `<how this client expects files to be attached>`
+
+## Same-day exam to MP4
+
+1. C-ECHO `primary`, then study-level C-FIND by patient-name wildcard and
+   today's `StudyDate`; verify the exact registered name.
+2. C-GET the study into a per-request temporary folder.
+3. `dicom_volume_video.py --path <folder> --out <videos> --list-series --include-descriptions --summary`
+4. Export the clinically relevant series by `--series-number`.
+5. Deliver the MP4, then clean the temporary download folder.
+
+## Same-day exam to cloud drive
+
+Follow `study-delivery-workflow.md` with the destination above.
+
+## Local conventions
+
+- Temporary/audit root: `<path>`
+- Anything this site forbids or requires (for example, anonymize before any
+  external share): `<notes>`

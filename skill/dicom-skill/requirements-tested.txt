@@ -1,0 +1,13 @@
+# Exact versions the test suite last passed with (Python 3.13).
+# requirements.txt keeps the supported ranges; use this file to reproduce a
+# known-good environment:  pip install -r requirements-tested.txt
+pydicom==3.0.2
+pynetdicom==3.0.4
+requests==2.34.2
+PyYAML==6.0.4
+numpy==2.5.5
+pylibjpeg==2.1.0
+pylibjpeg-openjpeg==2.6.0
+Pillow==13.0.0
+imageio==2.38.2
+imageio-ffmpeg==0.8.1

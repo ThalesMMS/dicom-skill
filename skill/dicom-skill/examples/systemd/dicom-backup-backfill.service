@@ -1,0 +1,32 @@
+# Example unit for scripts/dicom_cloud_backup.py. Adjust User/Group, /opt/dicom-skill,
+# and the paths below to your install; site values live in /etc/dicom-skill/backup.env
+# (see backup.env.example). See references/cloud-backup-runbook.md.
+[Unit]
+Description=DICOM study backup: historical backfill
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/dicom-skill/.venv/bin/python /opt/dicom-skill/scripts/dicom_cloud_backup.py --dicom-config /etc/dicom-skill/dicom_nodes.local.yaml --state-dir /var/lib/dicom-backup/state --work-dir /var/lib/dicom-backup/work run --lane backfill --node ${DICOM_BACKUP_BACKFILL_NODE} --start ${DICOM_BACKUP_BACKFILL_START} --end ${DICOM_BACKUP_BACKFILL_END}
+User=dicom
+Group=dicom
+WorkingDirectory=/opt/dicom-skill
+EnvironmentFile=/etc/dicom-skill/backup.env
+Environment=PYTHONUNBUFFERED=1
+Environment=RCLONE_CONFIG=/var/lib/dicom-backup/rclone.conf
+StateDirectory=dicom-backup
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=30min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dicom-backup
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
